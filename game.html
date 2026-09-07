@@ -19,15 +19,61 @@
 
     <div class="layout">
       <div class="stage">
+        <div class="stage-toolbar">
+          <button class="icon-btn" id="musicToggleBtn" title="Putar/berhenti musik" aria-pressed="false">🔇 Musik</button>
+          <button class="icon-btn" id="fullscreenBtn" title="Layar penuh">⛶ Layar Penuh</button>
+        </div>
         <canvas id="board" width="660" height="480"></canvas>
         <div id="toast" class="toast hidden"></div>
-        <p class="hint">Klik petak yang bisa dilewati untuk memindahkan pemain. Panah keyboard (↑↓←→) juga bisa dipakai.
-        </p>
+        <div id="roundEndOverlay" class="round-end hidden">
+          <div class="round-end-card">
+            <h3 id="roundEndTitle">Permainan Selesai</h3>
+            <p id="roundEndBody"></p>
+            <button class="btn-primary" id="roundEndPlayAgainBtn">Main Lagi</button>
+          </div>
+        </div>
+        <p class="hint" id="modeHint">Klik petak yang bisa dilewati untuk memindahkan pemain. Panah keyboard (↑↓←→) juga
+          bisa dipakai.</p>
       </div>
 
       <aside class="hud">
         <section class="panel">
-          <h2>Kontrol Pencarian</h2>
+          <h2>Mode Permainan</h2>
+          <div class="field">
+            <label for="modeSelect">Pilih mode</label>
+            <select id="modeSelect">
+              <option value="single">Single Player — Demo Pathfinding NPC</option>
+              <option value="multi">Multiplayer Lokal — Kejar Koin</option>
+            </select>
+          </div>
+        </section>
+
+        <section class="panel" id="multiSetupPanel" style="display:none;">
+          <h2>Pengaturan Multiplayer</h2>
+          <div class="field">
+            <label for="playerCountSelect">Jumlah pemain (satu keyboard, gantian tangan)</label>
+            <select id="playerCountSelect">
+              <option value="2">2 pemain</option>
+              <option value="3">3 pemain</option>
+              <option value="4">4 pemain</option>
+            </select>
+          </div>
+          <div id="playerControlsList"></div>
+          <div class="btnrow" style="margin-top:10px;">
+            <button class="btn-primary" id="startRoundBtn">Mulai Permainan</button>
+            <button class="btn-secondary" id="resetRoundBtn">Reset</button>
+          </div>
+          <p class="desc" style="margin:10px 0 0;">Klik salah satu tombol arah di atas lalu tekan tombol keyboard baru
+            untuk mengatur ulang kontrol pemain tersebut.</p>
+        </section>
+
+        <section class="panel" id="scoreboardPanel" style="display:none;">
+          <h2>Papan Skor</h2>
+          <div id="scoreboardList"></div>
+        </section>
+
+        <section class="panel" id="searchControlPanel">
+          <h2>Kontrol Pencarian (AI Hantu/NPC)</h2>
           <div class="field">
             <label for="algoSelect">Algoritma NPC</label>
             <select id="algoSelect">
@@ -54,13 +100,13 @@
           </div>
           <div class="rangehead"><span>Kecepatan NPC</span><span id="speedLabel">sedang</span></div>
           <input type="range" id="speedRange" min="60" max="500" value="220" step="20">
-          <div class="btnrow" style="margin-top:10px;">
+          <div class="btnrow" style="margin-top:10px;" id="singleMapButtons">
             <button class="btn-secondary" id="newMapBtn">Peta Baru</button>
             <button class="btn-secondary" id="respawnBtn">Reset Posisi</button>
           </div>
         </section>
 
-        <section class="panel">
+        <section class="panel" id="liveStatsPanel">
           <h2>Statistik Langsung (NPC)</h2>
           <dl id="liveStats">
             <dt>Algoritma aktif</dt>
@@ -83,18 +129,19 @@
             <div class="item"><span class="swatch" style="background:#2f6f8f;"></span>Sungai (biaya 4)</div>
             <div class="item"><span class="swatch" style="background:#20361c;"></span>Pohon (blokir)</div>
             <div class="item"><span class="swatch" style="background:#8a3b2c;"></span>Rumah (blokir)</div>
-            <div class="item"><span class="swatch" style="background:#e3ad4c;"></span>Pemain</div>
-            <div class="item"><span class="swatch" style="background:#e0533d;"></span>NPC</div>
+            <div class="item"><span class="swatch" style="background:#e3ad4c;"></span>Pemain / P1</div>
+            <div class="item"><span class="swatch" style="background:#e0533d;"></span>NPC / Hantu</div>
+            <div class="item"><span class="swatch" style="background:#f4d35e;"></span>Koin</div>
           </div>
         </section>
 
-        <section class="panel">
+        <section class="panel" id="howToPanel">
           <h2>Cara Bermain</h2>
-          <p class="desc" style="margin:0;">Gerakkan pemain dengan <b>WASD</b> atau tombol panah (↑↓←→) di keyboard. NPC
-            akan terus menghitung ulang jalur terpendek menuju posisi pemain saat ini.</p>
+          <p class="desc" style="margin:0;" id="howToText">Gerakkan pemain dengan <b>WASD</b> atau tombol panah (↑↓←→) di
+            keyboard. NPC akan terus menghitung ulang jalur terpendek menuju posisi pemain saat ini.</p>
         </section>
 
-        <section class="panel experiment">
+        <section class="panel experiment" id="experimentPanel">
           <h2>Eksperimen Heuristik</h2>
           <p class="desc">Menjalankan UCS (baseline optimal) dan A* dengan empat heuristik pada pasangan titik
             awal–tujuan acak di peta saat ini, memakai pengaturan diagonal yang aktif sekarang. Mengukur rata-rata node
@@ -110,6 +157,10 @@
       </aside>
     </div>
   </div>
+
+  <audio id="bgm" loop preload="auto">
+    <source src="Eric_Skiff_-_Underclocked___NO_COPYRIGHT_8-bit_Music___Background.mp3" type="audio/mpeg">
+  </audio>
 
 </body>
 

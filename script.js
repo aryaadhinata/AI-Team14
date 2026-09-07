@@ -28,11 +28,61 @@
     let npcTimer = null;
 
     const state = {
+        mode: 'single', // 'single' | 'multi'
         algo: 'astar',
         heuristic: 'octile',
         diagonal: true,
         showExplored: false,
         speedMs: 220
+    };
+
+    /* ---------- Multiplayer: konstanta & state ---------- */
+    const MP_CORNERS = [{
+        r: 1,
+        c: 1
+    }, {
+        r: 1,
+        c: COLS - 2
+    }, {
+        r: ROWS - 2,
+        c: 1
+    }, {
+        r: ROWS - 2,
+        c: COLS - 2
+    }];
+    const MP_COLORS = ['#e3ad4c', '#5bc8d9', '#d962c0', '#7ed957'];
+    const MP_NAMES = ['P1', 'P2', 'P3', 'P4'];
+    const MP_DEFAULT_CONTROLS = [{
+        up: 'w',
+        down: 's',
+        left: 'a',
+        right: 'd'
+    }, {
+        up: 'arrowup',
+        down: 'arrowdown',
+        left: 'arrowleft',
+        right: 'arrowright'
+    }, {
+        up: 'i',
+        down: 'k',
+        left: 'j',
+        right: 'l'
+    }, {
+        up: '8',
+        down: '5',
+        left: '4',
+        right: '6'
+    }];
+
+    let multi = {
+        numPlayers: 2,
+        players: [],
+        ghosts: [],
+        coins: [],
+        active: false,
+        over: false,
+        tickTimer: null,
+        listeningFor: null // {idx, dir} saat menunggu tombol baru
     };
 
     /* ---------- Util grid ---------- */
@@ -343,7 +393,7 @@
         };
     }
 
-    function generateMap() {
+    function buildGrid() {
         let attempts = 0;
         let g;
         do {
@@ -353,16 +403,23 @@
             placeTrees(g);
             attempts++;
         } while (largestComponentSize(g) < countPassable(g) * 0.85 && attempts < 20);
+        return g;
+    }
 
-        grid = g;
-        passableCells = [];
+    function computePassable(g) {
+        const cells = [];
         for (let r = 0; r < ROWS; r++)
             for (let c = 0; c < COLS; c++)
-                if (grid[r][c] !== TREE && grid[r][c] !== HOUSE) passableCells.push({
+                if (g[r][c] !== TREE && g[r][c] !== HOUSE) cells.push({
                     r,
                     c
                 });
+        return cells;
+    }
 
+    function generateMap() {
+        grid = buildGrid();
+        passableCells = computePassable(grid);
         placeEntitiesFixed();
         npcPath = null;
         lastSearchResult = null;
@@ -370,6 +427,65 @@
 
     function respawnPositions() {
         placeEntitiesFixed();
+    }
+
+    /* ---------- Multiplayer: peta, koin, pemain, hantu ---------- */
+    function setupCoins(spawnCells) {
+        const coins = [];
+        for (let r = 0; r < ROWS; r += 2) {
+            for (let c = 0; c < COLS; c += 2) {
+                if (!isPassable(r, c)) continue;
+                const nearSpawn = spawnCells.some(s => Math.abs(s.r - r) <= 1 && Math.abs(s.c - c) <= 1);
+                if (nearSpawn) continue;
+                coins.push({
+                    r,
+                    c
+                });
+            }
+        }
+        return coins;
+    }
+
+    function generateMultiplayerMap() {
+        grid = buildGrid();
+        passableCells = computePassable(grid);
+
+        const n = multi.numPlayers;
+        const spawnPts = MP_CORNERS.slice(0, n).map(p => nearestPassableCell(p.r, p.c));
+        const prevControls = multi.players.map(p => p.controls);
+        multi.players = spawnPts.map((sp, i) => ({
+            id: i,
+            name: MP_NAMES[i],
+            color: MP_COLORS[i],
+            r: sp.r,
+            c: sp.c,
+            spawn: {
+                r: sp.r,
+                c: sp.c
+            },
+            lives: 3,
+            score: 0,
+            alive: true,
+            invulnUntil: 0,
+            controls: prevControls[i] ? Object.assign({}, prevControls[i]) : Object.assign({}, MP_DEFAULT_CONTROLS[i])
+        }));
+
+        const center = nearestPassableCell(Math.floor(ROWS / 2), Math.floor(COLS / 2));
+        const ghostCount = n >= 3 ? 2 : 1;
+        multi.ghosts = [];
+        for (let i = 0; i < ghostCount; i++) {
+            const gp = i === 0 ? center : farthestPassableCell(center);
+            multi.ghosts.push({
+                r: gp.r,
+                c: gp.c
+            });
+        }
+
+        multi.coins = setupCoins(spawnPts);
+        multi.active = false;
+        multi.over = false;
+        npcPath = null;
+        lastSearchResult = null;
     }
 
     /* ---------- Render ---------- */
@@ -484,12 +600,79 @@
         ctx.restore();
     }
 
+    function drawCoins() {
+        multi.coins.forEach(k => {
+            const x = k.c * CELL + CELL / 2,
+                y = k.r * CELL + CELL / 2;
+            ctx.fillStyle = '#f4d35e';
+            ctx.beginPath();
+            ctx.arc(x, y, 4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.25)';
+            ctx.lineWidth = 1;
+            ctx.stroke();
+        });
+    }
+
+    function drawMultiEntities() {
+        const now = performance.now();
+        multi.players.forEach(p => {
+            if (!p.alive) return;
+            const blinking = p.invulnUntil && now < p.invulnUntil && Math.floor(now / 150) % 2 === 0;
+            if (blinking) return;
+            const px = p.c * CELL + CELL / 2,
+                py = p.r * CELL + CELL / 2;
+            ctx.fillStyle = p.color;
+            ctx.beginPath();
+            ctx.arc(px, py, CELL * 0.32, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = 'rgba(0,0,0,0.35)';
+            ctx.lineWidth = 1.6;
+            ctx.stroke();
+            ctx.fillStyle = '#1a1a1a';
+            ctx.font = 'bold 12px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(String(p.id + 1), px, py + 1);
+        });
+        multi.ghosts.forEach(g => {
+            const nx = g.c * CELL + CELL / 2,
+                ny = g.r * CELL + CELL / 2;
+            ctx.fillStyle = '#e0533d';
+            ctx.beginPath();
+            ctx.arc(nx, ny, CELL * 0.3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.strokeStyle = '#7d2113';
+            ctx.lineWidth = 1.4;
+            ctx.stroke();
+            ctx.fillStyle = '#fff';
+            ctx.beginPath();
+            ctx.arc(nx - 4, ny - 3, 2.4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(nx + 4, ny - 3, 2.4, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillStyle = '#222';
+            ctx.beginPath();
+            ctx.arc(nx - 4, ny - 3, 1.1, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.beginPath();
+            ctx.arc(nx + 4, ny - 3, 1.1, 0, Math.PI * 2);
+            ctx.fill();
+        });
+    }
+
     function draw() {
         for (let r = 0; r < ROWS; r++)
             for (let c = 0; c < COLS; c++) drawTile(r, c);
-        drawExploredOverlay();
-        drawPathOverlay();
-        drawEntities();
+        if (state.mode === 'multi') {
+            drawCoins();
+            drawMultiEntities();
+        } else {
+            drawExploredOverlay();
+            drawPathOverlay();
+            drawEntities();
+        }
     }
 
     /* ---------- Logika NPC & pemain ---------- */
@@ -540,7 +723,17 @@
         }, 500);
     }
 
+    function stopSingleLoop() {
+        clearTimeout(npcTimer);
+    }
+
+    function startSingleLoop() {
+        clearTimeout(npcTimer);
+        npcTimer = setTimeout(npcTick, state.speedMs);
+    }
+
     function npcTick() {
+        if (state.mode !== 'single') return;
         recomputeNpcPath();
         if (npcPath.length > 1) {
             npc = {
@@ -567,6 +760,7 @@
 
     /* ---------- Event handling ---------- */
     canvas.addEventListener('click', (e) => {
+        if (state.mode !== 'single') return;
         const rect = canvas.getBoundingClientRect();
         const scaleX = canvas.width / rect.width,
             scaleY = canvas.height / rect.height;
@@ -577,7 +771,73 @@
         if (inBounds(r, c)) tryMovePlayer(r, c);
     });
 
+    function normKey(k) {
+        return (k || '').toLowerCase();
+    }
+
+    function keyLabel(k) {
+        const map = {
+            arrowup: '↑',
+            arrowdown: '↓',
+            arrowleft: '←',
+            arrowright: '→',
+            ' ': 'Space'
+        };
+        if (map[k]) return map[k];
+        return k.length === 1 ? k.toUpperCase() : k;
+    }
+
+    function handleMultiplayerKey(e) {
+        if (!multi.active || multi.over) return;
+        const k = normKey(e.key);
+        let moved = false;
+        multi.players.forEach((p) => {
+            if (!p.alive) return;
+            const c = p.controls;
+            let dr = 0,
+                dc = 0;
+            if (k === c.up) dr = -1;
+            else if (k === c.down) dr = 1;
+            else if (k === c.left) dc = -1;
+            else if (k === c.right) dc = 1;
+            else return;
+            moved = true;
+            movePlayerMulti(p, dr, dc);
+        });
+        if (moved) {
+            e.preventDefault();
+            draw();
+        }
+    }
+
     window.addEventListener('keydown', (e) => {
+        // Menangkap tombol baru saat mengatur ulang kontrol pemain
+        if (multi.listeningFor) {
+            e.preventDefault();
+            const {
+                idx,
+                dir
+            } = multi.listeningFor;
+            const newKey = normKey(e.key);
+            const conflict = multi.players.some((p, i) => i !== idx && Object.values(p.controls).includes(newKey));
+            if (conflict) {
+                showToast('Tombol itu sudah dipakai pemain lain.');
+                return;
+            }
+            multi.players[idx].controls[dir] = newKey;
+            multi.listeningFor = null;
+            renderPlayerControlsUI();
+            return;
+        }
+
+        const tag = e.target && e.target.tagName;
+        if (tag === 'INPUT' || tag === 'SELECT' || tag === 'TEXTAREA') return;
+
+        if (state.mode === 'multi') {
+            handleMultiplayerKey(e);
+            return;
+        }
+
         const map = {
             ArrowUp: [-1, 0],
             ArrowDown: [1, 0],
@@ -601,17 +861,17 @@
     document.getElementById('algoSelect').addEventListener('change', (e) => {
         state.algo = e.target.value;
         document.getElementById('heuristicSelect').disabled = (state.algo === 'ucs');
-        recomputeNpcPath();
+        if (state.mode === 'single') recomputeNpcPath();
         draw();
     });
     document.getElementById('heuristicSelect').addEventListener('change', (e) => {
         state.heuristic = e.target.value;
-        recomputeNpcPath();
+        if (state.mode === 'single') recomputeNpcPath();
         draw();
     });
     document.getElementById('diagonalToggle').addEventListener('change', (e) => {
         state.diagonal = e.target.checked;
-        recomputeNpcPath();
+        if (state.mode === 'single') recomputeNpcPath();
         draw();
     });
     document.getElementById('exploredToggle').addEventListener('change', (e) => {
@@ -624,14 +884,300 @@
         document.getElementById('speedLabel').textContent = label;
     });
     document.getElementById('newMapBtn').addEventListener('click', () => {
+        if (state.mode !== 'single') return;
         generateMap();
         recomputeNpcPath();
         draw();
     });
     document.getElementById('respawnBtn').addEventListener('click', () => {
+        if (state.mode !== 'single') return;
         respawnPositions();
         recomputeNpcPath();
         draw();
+    });
+
+    /* ---------- Multiplayer: gameplay ---------- */
+    function stopGhostLoop() {
+        clearTimeout(multi.tickTimer);
+    }
+
+    function nearestAlivePlayer(g) {
+        let best = null,
+            bestD = Infinity;
+        multi.players.forEach(p => {
+            if (!p.alive) return;
+            const d = Math.abs(p.r - g.r) + Math.abs(p.c - g.c);
+            if (d < bestD) {
+                bestD = d;
+                best = p;
+            }
+        });
+        return best;
+    }
+
+    function applyGhostHit(p) {
+        const now = performance.now();
+        if (p.invulnUntil && now < p.invulnUntil) return;
+        p.lives--;
+        if (p.lives <= 0) {
+            p.lives = 0;
+            p.alive = false;
+            showToast(p.name + ' kehabisan nyawa!');
+        } else {
+            showToast(p.name + ' tertangkap! Sisa nyawa: ' + p.lives);
+            p.r = p.spawn.r;
+            p.c = p.spawn.c;
+            p.invulnUntil = now + 1200;
+        }
+        updateScoreboard();
+        checkWinConditions();
+    }
+
+    function checkGhostCollisionsForPlayer(p) {
+        if (!p.alive) return;
+        const now = performance.now();
+        if (p.invulnUntil && now < p.invulnUntil) return;
+        const hit = multi.ghosts.some(g => g.r === p.r && g.c === p.c);
+        if (hit) applyGhostHit(p);
+    }
+
+    function movePlayerMulti(p, dr, dc) {
+        const nr = p.r + dr,
+            nc = p.c + dc;
+        if (!isPassable(nr, nc)) return;
+        p.r = nr;
+        p.c = nc;
+        const ci = multi.coins.findIndex(k => k.r === nr && k.c === nc);
+        if (ci !== -1) {
+            multi.coins.splice(ci, 1);
+            p.score++;
+        }
+        checkGhostCollisionsForPlayer(p);
+        updateScoreboard();
+        checkWinConditions();
+    }
+
+    function ghostTickMulti() {
+        if (!multi.active || multi.over) return;
+        const heuristicFn = currentHeuristicFn();
+        multi.ghosts.forEach(g => {
+            const target = nearestAlivePlayer(g);
+            if (!target) return;
+            const res = search(g, target, state.diagonal, heuristicFn);
+            if (res.path && res.path.length > 1) {
+                g.r = res.path[1].r;
+                g.c = res.path[1].c;
+            }
+        });
+        multi.ghosts.forEach(g => {
+            multi.players.forEach(p => {
+                if (p.alive && p.r === g.r && p.c === g.c) applyGhostHit(p);
+            });
+        });
+        draw();
+        checkWinConditions();
+        if (multi.active && !multi.over) {
+            multi.tickTimer = setTimeout(ghostTickMulti, state.speedMs);
+        }
+    }
+
+    function endRound(title, body) {
+        multi.over = true;
+        multi.active = false;
+        stopGhostLoop();
+        stopMusic();
+        document.getElementById('roundEndTitle').textContent = title;
+        document.getElementById('roundEndBody').textContent = body;
+        document.getElementById('roundEndOverlay').classList.remove('hidden');
+    }
+
+    function endRoundByScore() {
+        const alive = multi.players.filter(p => p.alive);
+        const pool = alive.length ? alive : multi.players;
+        const maxScore = Math.max(...pool.map(p => p.score));
+        const winners = pool.filter(p => p.score === maxScore);
+        const names = winners.map(w => w.name).join(', ');
+        const title = winners.length > 1 ? 'Seri!' : (winners[0].name + ' Menang!');
+        const body = 'Semua koin terkumpul. ' + (winners.length > 1 ? ('Pemain ' + names + ' seri') : names) + ' dengan ' + maxScore + ' koin.';
+        endRound(title, body);
+    }
+
+    function checkWinConditions() {
+        if (multi.over) return;
+        if (multi.coins.length === 0) {
+            endRoundByScore();
+            return;
+        }
+        const alivePlayers = multi.players.filter(p => p.alive);
+        if (alivePlayers.length === 0) {
+            endRound('Semua Pemain Kalah', 'Hantu menangkap semua pemain. Coba lagi!');
+        } else if (multi.players.length > 1 && alivePlayers.length === 1) {
+            endRound(alivePlayers[0].name + ' Menang!', alivePlayers[0].name + ' adalah pemain terakhir yang bertahan dengan ' + alivePlayers[0].score + ' koin.');
+        }
+    }
+
+    function hideRoundEnd() {
+        document.getElementById('roundEndOverlay').classList.add('hidden');
+    }
+
+    function updateScoreboard() {
+        const el = document.getElementById('scoreboardList');
+        if (!el) return;
+        el.innerHTML = multi.players.map(p => {
+            const hearts = Array.from({
+                length: 3
+            }, (_, i) => i < p.lives ? '❤️' : '<span class="lost">❤️</span>').join('');
+            return '<div class="score-row ' + (p.alive ? '' : 'eliminated') + '">' +
+                '<span class="player-dot" style="background:' + p.color + '"></span>' +
+                '<span class="score-name">' + p.name + '</span>' +
+                '<span class="hearts">' + hearts + '</span>' +
+                '<span class="score-coins">\uD83E\uDE99 ' + p.score + '</span>' +
+                '</div>';
+        }).join('') + '<div class="desc" style="margin-top:8px;">Koin tersisa: <b>' + multi.coins.length + '</b></div>';
+    }
+
+    function renderPlayerControlsUI() {
+        const container = document.getElementById('playerControlsList');
+        if (!container) return;
+        container.innerHTML = multi.players.map((p, idx) => {
+            const dirs = [
+                ['up', 'Atas'],
+                ['left', 'Kiri'],
+                ['down', 'Bawah'],
+                ['right', 'Kanan']
+            ];
+            const keys = dirs.map(([dir, label]) =>
+                '<div class="key-btn" data-idx="' + idx + '" data-dir="' + dir + '">' +
+                '<span class="k-label">' + label + '</span><span class="k-val">' + keyLabel(p.controls[dir]) + '</span></div>'
+            ).join('');
+            return '<div class="player-row">' +
+                '<div class="player-row-head"><span class="player-dot" style="background:' + p.color + '"></span>' + p.name + '</div>' +
+                '<div class="key-grid">' + keys + '</div>' +
+                '</div>';
+        }).join('');
+        container.querySelectorAll('.key-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                container.querySelectorAll('.key-btn').forEach(b => b.classList.remove('listening'));
+                multi.listeningFor = {
+                    idx: parseInt(btn.dataset.idx, 10),
+                    dir: btn.dataset.dir
+                };
+                btn.classList.add('listening');
+                btn.querySelector('.k-val').textContent = '...';
+            });
+        });
+    }
+
+    function startMultiplayerRound() {
+        if (multi.over) resetMultiplayerRound();
+        multi.active = true;
+        hideRoundEnd();
+        playMusic();
+        stopGhostLoop();
+        ghostTickMulti();
+    }
+
+    function resetMultiplayerRound() {
+        stopGhostLoop();
+        generateMultiplayerMap();
+        renderPlayerControlsUI();
+        updateScoreboard();
+        hideRoundEnd();
+        draw();
+    }
+
+    function setMode(newMode) {
+        state.mode = newMode;
+        const isMulti = newMode === 'multi';
+        document.getElementById('multiSetupPanel').style.display = isMulti ? 'block' : 'none';
+        document.getElementById('scoreboardPanel').style.display = isMulti ? 'block' : 'none';
+        document.getElementById('liveStatsPanel').style.display = isMulti ? 'none' : 'block';
+        document.getElementById('experimentPanel').style.display = isMulti ? 'none' : 'block';
+        document.getElementById('singleMapButtons').style.display = isMulti ? 'none' : 'flex';
+        document.getElementById('howToText').innerHTML = isMulti ?
+            'Setiap pemain punya tombol gerak sendiri (atur di panel Multiplayer). Kumpulkan koin kuning dan hindari hantu merah. Setiap pemain punya <b>3 nyawa</b> — tertangkap hantu mengurangi 1 nyawa dan pemain kembali ke titik awal. Ronde berakhir saat semua koin habis atau hanya tersisa satu pemain yang bertahan.' :
+            'Gerakkan pemain dengan <b>WASD</b> atau tombol panah (↑↓←→) di keyboard. NPC akan terus menghitung ulang jalur terpendek menuju posisi pemain saat ini.';
+        document.getElementById('modeHint').textContent = isMulti ?
+            'Setiap pemain memakai tombolnya sendiri (lihat panel Multiplayer). Klik "Mulai Permainan" untuk memulai ronde.' :
+            'Klik petak yang bisa dilewati untuk memindahkan pemain. Panah keyboard (↑↓←→) juga bisa dipakai.';
+
+        if (isMulti) {
+            stopSingleLoop();
+            multi.numPlayers = parseInt(document.getElementById('playerCountSelect').value, 10);
+            generateMultiplayerMap();
+            renderPlayerControlsUI();
+            updateScoreboard();
+            hideRoundEnd();
+            draw();
+        } else {
+            stopGhostLoop();
+            stopMusic();
+            hideRoundEnd();
+            generateMap();
+            document.getElementById('heuristicSelect').disabled = (state.algo === 'ucs');
+            recomputeNpcPath();
+            draw();
+            startSingleLoop();
+        }
+    }
+
+    document.getElementById('modeSelect').addEventListener('change', (e) => {
+        setMode(e.target.value);
+    });
+    document.getElementById('playerCountSelect').addEventListener('change', (e) => {
+        multi.numPlayers = parseInt(e.target.value, 10);
+        resetMultiplayerRound();
+    });
+    document.getElementById('startRoundBtn').addEventListener('click', () => {
+        startMultiplayerRound();
+    });
+    document.getElementById('resetRoundBtn').addEventListener('click', () => {
+        resetMultiplayerRound();
+    });
+    document.getElementById('roundEndPlayAgainBtn').addEventListener('click', () => {
+        resetMultiplayerRound();
+    });
+
+    /* ---------- Layar penuh ---------- */
+    document.getElementById('fullscreenBtn').addEventListener('click', () => {
+        const stageEl = document.querySelector('.stage');
+        if (!document.fullscreenElement) {
+            stageEl.requestFullscreen().catch(() => showToast('Layar penuh tidak didukung di browser ini.'));
+        } else {
+            document.exitFullscreen();
+        }
+    });
+    document.addEventListener('fullscreenchange', () => {
+        const btn = document.getElementById('fullscreenBtn');
+        btn.textContent = document.fullscreenElement ? '⛶ Keluar Layar Penuh' : '⛶ Layar Penuh';
+    });
+
+    /* ---------- Musik (tidak diputar otomatis) ---------- */
+    const bgm = document.getElementById('bgm');
+    let musicOn = false;
+
+    function updateMusicBtn() {
+        const btn = document.getElementById('musicToggleBtn');
+        btn.textContent = musicOn ? '🔊 Musik' : '🔇 Musik';
+        btn.classList.toggle('on', musicOn);
+        btn.setAttribute('aria-pressed', String(musicOn));
+    }
+
+    function playMusic() {
+        musicOn = true;
+        bgm.play().catch(() => {});
+        updateMusicBtn();
+    }
+
+    function stopMusic() {
+        musicOn = false;
+        bgm.pause();
+        updateMusicBtn();
+    }
+
+    document.getElementById('musicToggleBtn').addEventListener('click', () => {
+        if (musicOn) stopMusic();
+        else playMusic();
     });
 
     /* ---------- Eksperimen heuristik ---------- */
@@ -759,10 +1305,13 @@
     document.getElementById('runExperimentBtn').addEventListener('click', runExperiment);
 
     /* ---------- Inisialisasi ---------- */
+    state.mode = 'single';
+    multi.numPlayers = parseInt(document.getElementById('playerCountSelect').value, 10) || 2;
     generateMap();
     document.getElementById('heuristicSelect').disabled = (state.algo === 'ucs');
     recomputeNpcPath();
     draw();
-    npcTimer = setTimeout(npcTick, state.speedMs);
+    startSingleLoop();
+    // Musik TIDAK diputar otomatis — hanya lewat tombol musik atau saat ronde multiplayer dimulai.
 
 })();

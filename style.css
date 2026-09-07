@@ -396,3 +396,212 @@ table.results th {
         flex: 1 1 auto;
     }
 }
+/* ---------- Toolbar di atas canvas (musik & fullscreen) ---------- */
+.stage-toolbar {
+    display: flex;
+    justify-content: flex-end;
+    gap: 8px;
+    margin-bottom: 8px;
+}
+
+.icon-btn {
+    cursor: pointer;
+    border: 1px solid var(--line);
+    background: var(--panel-alt);
+    color: var(--text);
+    border-radius: 7px;
+    padding: 7px 12px;
+    font-family: var(--font-head);
+    font-weight: 600;
+    font-size: .78rem;
+    transition: filter .12s, transform .12s;
+}
+
+.icon-btn:hover {
+    filter: brightness(1.18);
+}
+
+.icon-btn:active {
+    transform: translateY(1px);
+}
+
+.icon-btn.on {
+    background: var(--gold-soft);
+    border-color: rgba(227, 173, 76, .5);
+    color: var(--gold);
+}
+
+/* ---------- Fullscreen ---------- */
+.stage:fullscreen {
+    background: var(--bg);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    padding: 16px;
+}
+
+.stage:fullscreen #board {
+    width: auto;
+    height: min(94vh, 900px);
+    max-width: 98vw;
+}
+
+.stage:fullscreen .hint {
+    color: var(--muted);
+}
+
+/* ---------- Overlay akhir ronde ---------- */
+.round-end {
+    position: absolute;
+    inset: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: rgba(9, 14, 9, .72);
+    border-radius: 10px;
+    backdrop-filter: blur(2px);
+    transition: opacity .2s;
+}
+
+.round-end.hidden {
+    opacity: 0;
+    pointer-events: none;
+}
+
+.round-end-card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 22px 26px;
+    max-width: 360px;
+    text-align: center;
+    box-shadow: 0 20px 50px -18px rgba(0, 0, 0, .8);
+}
+
+.round-end-card h3 {
+    margin: 0 0 10px;
+    color: var(--gold);
+    font-size: 1.15rem;
+}
+
+.round-end-card p {
+    margin: 0 0 16px;
+    color: var(--text);
+    font-size: .9rem;
+    line-height: 1.5;
+}
+
+/* ---------- Pengaturan kontrol multiplayer ---------- */
+.player-row {
+    border: 1px solid var(--line);
+    background: var(--panel-alt);
+    border-radius: 8px;
+    padding: 9px 10px;
+    margin-bottom: 8px;
+}
+
+.player-row-head {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 8px;
+    font-size: .82rem;
+    font-weight: 600;
+}
+
+.player-dot {
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    flex-shrink: 0;
+    border: 1px solid rgba(255, 255, 255, .25);
+}
+
+.key-grid {
+    display: grid;
+    grid-template-columns: repeat(4, 1fr);
+    gap: 6px;
+}
+
+.key-btn {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    color: var(--text);
+    border-radius: 6px;
+    padding: 6px 4px;
+    font-family: var(--font-mono);
+    font-size: .68rem;
+    text-align: center;
+    cursor: pointer;
+    line-height: 1.3;
+}
+
+.key-btn .k-label {
+    display: block;
+    color: var(--muted);
+    font-family: var(--font-head);
+    font-size: .64rem;
+    margin-bottom: 2px;
+}
+
+.key-btn.listening {
+    border-color: var(--gold);
+    color: var(--gold);
+    animation: pulseKey 1s ease-in-out infinite;
+}
+
+@keyframes pulseKey {
+
+    0%,
+    100% {
+        filter: brightness(1);
+    }
+
+    50% {
+        filter: brightness(1.5);
+    }
+}
+
+/* ---------- Papan skor multiplayer ---------- */
+.score-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    padding: 7px 0;
+    border-bottom: 1px solid var(--line);
+    font-size: .82rem;
+}
+
+.score-row:last-child {
+    border-bottom: none;
+}
+
+.score-row .player-dot {
+    width: 14px;
+    height: 14px;
+}
+
+.score-row .score-name {
+    flex: 1;
+    font-weight: 600;
+}
+
+.score-row.eliminated {
+    opacity: .45;
+}
+
+.score-row .score-coins {
+    font-family: var(--font-mono);
+    color: var(--gold);
+    font-size: .78rem;
+}
+
+.hearts {
+    font-size: .8rem;
+    letter-spacing: 1px;
+}
+
+.hearts .lost {
+    opacity: .25;
+}

@@ -1,7 +1,8 @@
 """
 Kejar-Kejaran di Desa — NPC Pathfinding (UCS vs A*)
 Pygame. Grafik memakai sprite sheet asli (TX_Plant, TX_Shadow_Plant, TX_Props,
-TX_Shadow, TX_Player, TX_Tileset_Grass) 
+TX_Shadow, TX_Player, TX_Tileset_Grass) — taruh ke-6 file PNG tsb di folder
+yang sama dengan game.py ini supaya bisa jalan.
 
 Kontrol:
     - Panah / WASD  : gerakkan pemain (tahan utk jalan terus, melambat di semak)
@@ -36,7 +37,7 @@ ROWS, COLS, CELL = int(16*1.2), int(22*1.2), int(32*1.2)
 
 # Tipe medan
 GRASS, TREE, PROP, BUSH = 0, 1, 2, 3
-BUSH_COST = 3  # biaya melintasi semak dalam pathfinding 
+BUSH_COST = 3  # biaya melintasi semak dalam pathfinding (dulunya sungai)
 
 CHAR_W = CELL           # lebar karakter = 1 petak
 CHAR_H = CELL * 2        # tinggi karakter = 2 petak  -> dimensi 1x2
@@ -531,8 +532,10 @@ class Game:
 
     @staticmethod
     def _facing_from_delta(dr, dc):
+        """Sprite 'side' sumbernya (TX_Player.png) secara alami menghadap
+        KIRI, jadi flip=True dipakai saat bergerak ke KANAN (dc > 0)."""
         if dc != 0:
-            return "side", dc < 0
+            return "side", dc > 0
         if dr > 0:
             return "front", False
         if dr < 0:
@@ -544,8 +547,10 @@ class Game:
         if len(self.npc_path) > 1:
             nr, nc = self.npc_path[1]
             dr, dc = nr - self.npc[0], nc - self.npc[1]
-            facing, _ = self._facing_from_delta(dr, dc)
+            facing, flip = self._facing_from_delta(dr, dc)
             self.npc_facing = facing
+            if dc != 0:
+                self._npc_flip_state = flip
             self.npc = (nr, nc)
             self.npc_last_move = time.perf_counter()
             # melambat kalau berjalan MELEWATI/masuk ke petak semak
@@ -559,8 +564,10 @@ class Game:
         if not is_passable(self.grid, r, c):
             return False
         dr, dc = r - self.player[0], c - self.player[1]
-        facing, _ = self._facing_from_delta(dr, dc)
+        facing, flip = self._facing_from_delta(dr, dc)
         self.player_facing = facing
+        if dc != 0:
+            self._player_flip_state = flip
         self.player = (r, c)
         self.player_last_move = time.perf_counter()
         # melambat kalau melangkah masuk ke petak semak
@@ -780,8 +787,6 @@ class Game:
         }
         if key in move_map:
             dr, dc = move_map[key]
-            if dc != 0:
-                self._player_flip_state = dc < 0
             nr, nc = self.player[0] + dr, self.player[1] + dc
             self.try_move_player(nr, nc)
             self.player_timer = 0.0
@@ -848,8 +853,6 @@ class Game:
             return
         c, r = x // CELL, y // CELL
         if in_bounds(r, c):
-            if c != self.player[1]:
-                self._player_flip_state = c < self.player[1]
             self.try_move_player(r, c)
 
     MOVE_KEYS = {
@@ -876,8 +879,6 @@ class Game:
         if dr == 0 and dc == 0:
             self.player_timer = self.player_step_ms  # siap gerak instan begitu ditekan lagi
             return
-        if dc != 0:
-            self._player_flip_state = dc < 0
         moved = self.try_move_player(self.player[0] + dr, self.player[1] + dc)
         if not moved:
             self.player_timer = self.player_step_ms
@@ -900,10 +901,7 @@ class Game:
                 self.npc_timer += dt * 1000
                 if self.npc_timer >= self.npc_step_delay:
                     self.npc_timer = 0.0
-                    prev = self.npc
                     self.npc_step()
-                    if self.npc != prev and self.npc[1] != prev[1]:
-                        self._npc_flip_state = self.npc[1] < prev[1]
 
             self.draw()
 

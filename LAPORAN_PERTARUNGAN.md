@@ -15,7 +15,7 @@ Modul: `pertarungan.py` · dipicu dari `game.py` saat NPC menangkap pemain
 **Action** `A = {ATTACK, DEFEND, HEAL, PARRY}` — branching factor = 4 di setiap node.
 | Aksi | Efek |
 |---|---|
-| **Attack** | Damage 18 ke lawan. Dibatalkan total + kena balik 10 kalau lawan *Parry*; dipotong 50% kalau lawan *Defend*. |
+| **Attack** | Damage 5 ke lawan. Dibatalkan total + kena balik 10 kalau lawan *Parry*; dipotong 50% kalau lawan *Defend*. |
 | **Defend** | Tidak ada efek langsung; mengurangi 50% damage serangan lawan di giliran berikut. |
 | **Heal** | Pulihkan 15 HP milik sendiri (dibatasi maksimum 100). |
 | **Parry** | Berisiko: kalau lawan menyerang giliran berikut, serangan dibatalkan total + lawan kena balik 10. Kalau lawan tidak menyerang, tidak berefek apa-apa (kesempatan terbuang). |

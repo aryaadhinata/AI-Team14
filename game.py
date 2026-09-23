@@ -31,6 +31,8 @@ import time
 
 import pygame
 
+import pertarungan as combat  # logika pertarungan giliran (minimax/alpha-beta/dll)
+
 # ---------------------------------------------------------------------------
 # Konfigurasi dasar
 # ---------------------------------------------------------------------------
@@ -45,7 +47,6 @@ BUSH_RADIUS = (2.0, 3.0)    # jari-jari tiap lingkaran semak (dalam petak)
 MAP_W, MAP_H = COLS * CELL, ROWS * CELL
 PANEL_W = 340                                # lebar dashboard di sisi kanan peta
 SCREEN_W, SCREEN_H = MAP_W + PANEL_W, MAP_H
-SCREEN_W, SCREEN_H = MAP_W + PANEL_W, MAP_H  # ruang HUD bawah
 FPS = 60
 CHAR_H = int(CELL * 1.2)  # tinggi render karakter (px) — sprite TX_Player.png diskalakan ke tinggi ini
 # Debug: isi angka di tiap petak (ganti dengan tombol L) & warna node yang di-expand
@@ -451,6 +452,7 @@ def largest_component_size(g):
             best = max(best, size)
     return best
 
+
 FIXED_PLAYER_SPAWN = (ROWS // 2, 3)          # kiri, tengah vertikal, 3 petak dari tepi peta
 FIXED_NPC_SPAWN = (ROWS // 2, COLS - 1 - 3)  # kanan, tengah vertikal, 3 petak dari tepi peta
 
@@ -528,6 +530,15 @@ class Game:
         self.toast_text = ""
         self.toast_until = 0.0
 
+        # --- pertarungan (dipicu saat NPC menangkap pemain, lihat on_capture) ---
+        self.in_combat = False
+        self.combat = None            # pertarungan.CombatState
+        self.combat_log = []          # beberapa baris log aksi terakhir (ditampilkan di modal)
+        self.combat_debug = None      # hasil choose_npc_action() terakhir -> overlay debug
+        self.combat_algo = "alphabeta"          # "minimax" | "alphabeta" | "early_stop" | "expectimax"
+        self.combat_depth = 4
+        self.combat_eval = "hp_diff"            # kunci ke combat.EVAL_FUNCTIONS
+
         # arah hadap & animasi
         self.player_facing = "front"
         self.npc_facing = "front"
@@ -545,7 +556,6 @@ class Game:
     # ---------------- Map lifecycle ----------------
     def new_map(self):
         self.grid, self.passable = generate_map()
-        spawn = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
         self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
         self.npc = nearest_passable_cell(self.passable, *FIXED_NPC_SPAWN)
         self.last_result = None
@@ -557,7 +567,6 @@ class Game:
         self.recompute_npc_path()
 
     def respawn(self):
-        spawn = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
         self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
         self.npc = nearest_passable_cell(self.passable, *FIXED_NPC_SPAWN)
         self.player_step_ms = PLAYER_STEP_MS
@@ -579,8 +588,46 @@ class Game:
         self.toast_until = time.perf_counter() + duration
 
     def on_capture(self):
-        self.show_toast("NPC menangkap pemain! Posisi direset.")
+        self.start_combat()
+
+    def start_combat(self):
+        self.in_combat = True
+        self.combat = combat.new_combat()
+        self.combat_log = ["NPC menangkap pemain — pertarungan dimulai!"]
+        self.combat_debug = None
+        if self.combat.to_move:      # NPC jalan duluan (dia yang menangkap)
+            self.combat_npc_turn()
+
+    def combat_npc_turn(self):
+        eval_fn = combat.EVAL_FUNCTIONS[self.combat_eval]
+        action, dbg = combat.choose_npc_action(
+            self.combat, algorithm=self.combat_algo, depth=self.combat_depth, eval_fn=eval_fn)
+        self.combat = combat.apply_action(self.combat, action)
+        self.combat_debug = dbg
+        self.combat_log.append(f"NPC -> {combat.ACTION_LABEL[action]}")
+        self._combat_check_end()
+
+    def combat_player_action(self, action):
+        if not self.in_combat or self.combat.to_move:
+            return
+        self.combat = combat.apply_action(self.combat, action)
+        self.combat_log.append(f"Pemain -> {combat.ACTION_LABEL[action]}")
+        if not self._combat_check_end() and self.combat.to_move:
+            self.combat_npc_turn()
+
+    def _combat_check_end(self):
+        """Kalau pertarungan sudah terminal: tampilkan hasil & kembali ke peta
+        (posisi direset seperti sebelumnya). Return True kalau sudah berakhir."""
+        if not self.combat.is_terminal():
+            return False
+        w = self.combat.winner()
+        msg = ("NPC menang! Posisi direset." if w is True else
+                "Pemain lolos dari pertarungan!" if w is False else
+                "Pertarungan seri (batas giliran habis).")
+        self.in_combat = False
+        self.show_toast(msg)
         self.respawn()
+        return True
 
     @staticmethod
     def _facing_from_delta(dr, dc):
@@ -991,9 +1038,9 @@ class Game:
         y = self._card_title(x, y, "KONTROL")
         hints = [("WASD", "gerak"), ("Klik", "pindah"), ("1", "A*"), ("2", "UCS"), ("H", "heuristik"),
                 ("G", "diagonal"), ("E", "debug"), ("L", "label angka"), ("M", "mode NPC"), ("T", "giliran"),
-                ("SPACE", "langkah NPC"), ("N", "peta baru"), ("R", "reset"), ("F", "layar penuh")]
+                ("SPACE", "langkah NPC"), ("N", "peta baru"), ("R", "reset"), ("F", "layar penuh"), ("ESC", "keluar")]
         for i, (k, d) in enumerate(hints):
-            hx, hy = x + (i % 2) * (W // 2), y + (i // 2) * 17
+            hx, hy = x + (i % 2) * (W // 2), y + (i // 2) * 16
             self.screen.blit(self.font_bold.render(k, True, ACC), (hx, hy))
             self.screen.blit(self.font_small.render(d, True, DIM), (hx + 54, hy))
 
@@ -1003,6 +1050,44 @@ class Game:
             box.fill((224, 83, 61, 235))
             box.blit(msg, (12, 7))
             self.screen.blit(box, (MAP_W // 2 - box.get_width() // 2, 12))
+
+    def draw_combat_overlay(self):
+        """Modal pertarungan giliran: HP bar kedua pihak, log aksi terakhir, dan
+        kartu debug NPC (aksi dipertimbangkan + skor + node count, lihat pertarungan.py)."""
+        if not self.in_combat:
+            return
+        W, H = 560, 460
+        x0, y0 = (MAP_W - W) // 2, (MAP_H - H) // 2
+        box = pygame.Surface((W, H), pygame.SRCALPHA)
+        box.fill((10, 16, 12, 235))
+        pygame.draw.rect(box, (255, 210, 90), box.get_rect(), 2)
+        pad = 18
+        box.blit(self.font_title.render("PERTARUNGAN!", True, (255, 220, 110)), (pad, pad))
+        y = pad + 34
+
+        def hp_bar(surf, x, y, w, h, hp, max_hp, color):
+            pygame.draw.rect(surf, (40, 20, 20), (x, y, w, h))
+            fill_w = int(w * max(0, hp) / max_hp)
+            pygame.draw.rect(surf, color, (x, y, fill_w, h))
+            pygame.draw.rect(surf, (230, 230, 220), (x, y, w, h), 1)
+
+        box.blit(self.font_small.render(f"Pemain  HP {self.combat.player_hp}/100", True, (235, 244, 230)), (pad, y))
+        hp_bar(box, pad, y + 18, W - 2 * pad, 14, self.combat.player_hp, combat.PLAYER_MAX_HP, (90, 200, 120))
+        y += 42
+        box.blit(self.font_small.render(f"NPC     HP {self.combat.npc_hp}/100", True, (235, 244, 230)), (pad, y))
+        hp_bar(box, pad, y + 18, W - 2 * pad, 14, self.combat.npc_hp, combat.NPC_MAX_HP, (220, 100, 90))
+        y += 48
+
+        for line in self.combat_log[-3:]:
+            box.blit(self.font_small.render(line, True, (200, 210, 195)), (pad, y))
+            y += 18
+        y += 6
+
+        if self.combat_debug:
+            y = combat.render_combat_debug_card(box, self.font_bold, self.font_tiny, pad, y, W - 2 * pad, self.combat_debug)
+
+        box.blit(self.font_small.render("1 Serang   2 Bertahan   3 Pulihkan   4 Tangkis", True, (255, 220, 110)), (pad, H - 28))
+        self.screen.blit(box, (x0, y0))
 
     def draw(self):
         self.screen.fill((20, 30, 20))
@@ -1014,10 +1099,20 @@ class Game:
         self.draw_debug_overlay()
         self.draw_debug_tooltip()
         self.draw_hud()
+        self.draw_combat_overlay()
         pygame.display.flip()
 
     # ---------------- Input / loop ----------------
     def handle_key(self, key):
+        if self.in_combat:  # 1-4 pilih aksi, tombol lain (gerak dsb) diabaikan saat bertarung
+            combat_keys = {pygame.K_1: combat.Action.ATTACK, pygame.K_2: combat.Action.DEFEND,
+                            pygame.K_3: combat.Action.HEAL, pygame.K_4: combat.Action.PARRY}
+            if key in combat_keys:
+                self.combat_player_action(combat_keys[key])
+            elif key == pygame.K_ESCAPE:
+                pygame.quit()
+                sys.exit(0)
+            return
         move_map = {
             pygame.K_UP: (-1, 0), pygame.K_w: (-1, 0),
             pygame.K_DOWN: (1, 0), pygame.K_s: (1, 0),
@@ -1089,6 +1184,8 @@ class Game:
         self.fullscreen = False
 
     def handle_click(self, pos):
+        if self.in_combat:
+            return
         x, y = pos
         if y >= ROWS * CELL:
             return
@@ -1106,7 +1203,7 @@ class Game:
     def _poll_continuous_movement(self, dt):
         """Gerak halus saat tombol arah DITAHAN (real-time saja). Kecepatan
         melambat otomatis ketika pemain sedang berada di petak semak."""
-        if self.turn_based:
+        if self.turn_based or self.in_combat:
             return
         self.player_timer += dt * 1000
         if self.player_timer < self.player_step_ms:
@@ -1138,7 +1235,7 @@ class Game:
 
             self._poll_continuous_movement(dt)
 
-            if not self.turn_based and self.chase_mode == "auto":
+            if not self.turn_based and self.chase_mode == "auto" and not self.in_combat:
                 self.npc_timer += dt * 1000
                 if self.npc_timer >= self.npc_step_delay:
                     self.npc_timer = 0.0

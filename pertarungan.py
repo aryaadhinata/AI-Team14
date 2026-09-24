@@ -52,7 +52,7 @@ from enum import Enum
 
 PLAYER_MAX_HP = 100
 NPC_MAX_HP = 100
-ATTACK_DMG_MIN, ATTACK_DMG_MAX = 5, 10       # poin damage saat serangan BERHASIL
+ATTACK_DMG_MIN, ATTACK_DMG_MAX = 10, 25      # poin damage saat serangan BERHASIL
 ATTACK_DMG_WEIGHTS = [13, 8, 5, 3, 2, 1]     # bobot utk nilai 5,6,7,8,9,10 berurutan (10 paling jarang)
 ATTACK_HIT_BASE, ATTACK_HIT_CAP = 0.70, 0.85  # peluang serangan berhasil: 70% -> naik fibonacci -> maks 85%
 
@@ -109,7 +109,7 @@ def defend_penetration(streak):
     return _fib_ramp(streak, DEFEND_BASE_PENETRATION, DEFEND_CAP_PENETRATION)
 
 
-_ATTACK_DMG_VALUES = list(range(ATTACK_DMG_MIN, ATTACK_DMG_MAX + 1))
+_ATTACK_DMG_VALUES = [round(ATTACK_DMG_MIN + i * (ATTACK_DMG_MAX - ATTACK_DMG_MIN) / 5) for i in range(6)]
 _HEAL_MULT_VALUES = [round(HEAL_MULT_MIN + i * (HEAL_MULT_MAX - HEAL_MULT_MIN) / 5, 2) for i in range(6)]
 
 

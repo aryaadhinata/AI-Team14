@@ -1,6 +1,10 @@
 # -*- coding: utf-8 -*-
-"""Jalankan 6 eksperimen yang diminta & cetak hasilnya (dipakai buat mengisi LAPORAN.md
-dengan angka asli, bukan perkiraan)."""
+"""Jalankan 6 eksperimen yang diminta & cetak hasilnya (dipakai buat mengisi
+LAPORAN_PERTARUNGAN.md dengan angka asli, bukan perkiraan).
+
+UPDATE: disesuaikan dengan mekanik probabilitas baru di pertarungan.py —
+apply_action() sekarang balikin (state, event) bukan cuma state, jadi log
+simulate_combat() jadi 5-tuple (who, action, state, dbg, event)."""
 import math, random, time, json
 import pertarungan as m
 
@@ -66,12 +70,12 @@ for depth in range(1, 8):
 
 print()
 print("="*70)
-print("EKSPERIMEN 5: tingkah laku NPC (simulasi penuh per eval function)")
+print("EKSPERIMEN 5: tingkah laku NPC (simulasi penuh per eval function, MAX_TURNS default)")
 print("="*70)
 for name, fn in m.EVAL_FUNCTIONS.items():
     random.seed(42)
     res = m.simulate_combat(algorithm="alphabeta", depth=4, eval_fn=fn, verbose=False)
-    npc_actions = [a.value for who, a, st, dbg in res["log"] if who == "npc"]
+    npc_actions = [a.value for who, a, st, dbg, event in res["log"] if who == "npc"]
     counts = {a: npc_actions.count(a) for a in ("attack","defend","heal","parry")}
     winner = {True: "NPC", False: "Pemain", None: "Seri/limit"}[res["winner"]]
     print(f"{name:13s} -> pemenang={winner:11s} turns={res['turns']:2d}  aksi NPC: {counts}")
@@ -91,7 +95,6 @@ v_em, a_em = m.expectimax(s, 4, m.eval_hp_diff, m.ACTIONS, c_em, player_policy=r
 print(f"minimax   (asumsi pemain optimal) -> aksi={a_mm.value if a_mm else None} val={v_mm:.1f} nodes={c_mm['nodes']}")
 print(f"expectimax(asumsi pemain acak)    -> aksi={a_em.value if a_em else None} val={v_em:.1f} nodes={c_em['nodes']}")
 
-# bandingkan hasil menang jangka panjang lawan pemain acak sungguhan
 def run_many(algorithm, n=60, eval_fn=m.eval_hp_diff, **kw):
     wins = 0
     for i in range(n):
@@ -104,4 +107,44 @@ def run_many(algorithm, n=60, eval_fn=m.eval_hp_diff, **kw):
 
 wins_minimax = run_many("minimax", n=60)
 wins_expecti = run_many("expectimax", n=60)
-print(f"lawan 60x pemain ACAK -> minimax menang {wins_minimax}/60   |   expectimax menang {wins_expecti}/60")
+print(f"lawan 60x pemain ACAK, MAX_TURNS default -> minimax menang {wins_minimax}/60   |   expectimax menang {wins_expecti}/60")
+
+# ---------------------------------------------------------------------------
+# BONUS: eksperimen 1 (pertama kali dijalankan lewat run_experiments.py, sebelum
+# mekanik probabilitas ditambahkan) selalu berakhir menang. Setelah damage jadi
+# probabilistik (hit 70-85%, dmg 5-10) & heal jadi kuat (10-95% + bonus kritikal),
+# hasil di atas kemungkinan besar SERI SEMUA di MAX_TURNS default (20) karena
+# rata-rata damage per giliran turun jauh (dulu pasti 18, sekarang efektif ~4-5).
+# Bagian ini menjalankan ulang eksperimen 5 & 6 dengan MAX_TURNS dilonggarkan
+# (HANYA di skrip ini, tidak mengubah game sungguhan) supaya kelihatan siapa yang
+# sebenarnya lebih unggul kalau pertarungannya dibiarkan lebih panjang.
+# ---------------------------------------------------------------------------
+print()
+print("="*70)
+print("BONUS — EKSPERIMEN 5 & 6 diulang dengan MAX_TURNS=60 (analisis saja)")
+print("="*70)
+m.MAX_TURNS = 60
+
+for name, fn in m.EVAL_FUNCTIONS.items():
+    random.seed(42)
+    res = m.simulate_combat(algorithm="alphabeta", depth=4, eval_fn=fn, verbose=False)
+    npc_actions = [a.value for who, a, st, dbg, event in res["log"] if who == "npc"]
+    counts = {a: npc_actions.count(a) for a in ("attack","defend","heal","parry")}
+    winner = {True: "NPC", False: "Pemain", None: "Seri/limit"}[res["winner"]]
+    print(f"{name:13s} -> pemenang={winner:11s} turns={res['turns']:2d}  aksi NPC: {counts}")
+
+def run_many_long(algorithm, n=60, eval_fn=m.eval_hp_diff, **kw):
+    wins, draws, total_turns = 0, 0, 0
+    for i in range(n):
+        random.seed(1000+i)
+        res = m.simulate_combat(algorithm=algorithm, depth=3, eval_fn=eval_fn,
+                                 player_fn=lambda st: random.choice(m.ACTIONS), **kw)
+        total_turns += res["turns"]
+        wins += res["winner"] is True
+        draws += res["winner"] is None
+    return wins, draws, total_turns / n
+
+wm, dm, tm = run_many_long("minimax")
+we, de, te = run_many_long("expectimax")
+print(f"minimax    (MAX_TURNS=60) -> menang {wm}/60  seri {dm}/60  rata2 {tm:.1f} giliran")
+print(f"expectimax (MAX_TURNS=60) -> menang {we}/60  seri {de}/60  rata2 {te:.1f} giliran")

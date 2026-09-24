@@ -67,6 +67,7 @@ SS = 2  # faktor supersampling untuk gambar karakter (dirender besar lalu diperk
 # --- Kecepatan gerak (ms per petak) ---
 PLAYER_STEP_MS = 130         # kecepatan jalan normal pemain (tahan tombol)
 NPC_STEP_MS_DEFAULT = 220    # kecepatan jalan normal NPC (real-time)
+COMBAT_TURN_DELAY = 0.8      # jeda (detik) sebelum giliran NPC di pertarungan dieksekusi
 BUSH_SLOW_MULT = 2.1         # pengali cooldown langkah saat berada di petak semak
 
 
@@ -538,7 +539,9 @@ class Game:
         self.combat_algo = "alphabeta"          # "minimax" | "alphabeta" | "early_stop" | "expectimax"
         self.combat_depth = 4
         self.combat_eval = "hp_diff"            # kunci ke combat.EVAL_FUNCTIONS
-
+        self.combat_pending_action = None       # aksi NPC yg sudah diputuskan, menunggu delay sebelum dieksekusi
+        self.combat_turn_timer = 0.0
+        
         # arah hadap & animasi
         self.player_facing = "front"
         self.npc_facing = "front"
@@ -595,26 +598,41 @@ class Game:
         self.combat = combat.new_combat()
         self.combat_log = ["NPC menangkap pemain — pertarungan dimulai!"]
         self.combat_debug = None
-        if self.combat.to_move:      # NPC jalan duluan (dia yang menangkap)
-            self.combat_npc_turn()
+        self.combat_pending_action = None
+        if self.combat.to_move:
+            self._combat_npc_decide()
 
-    def combat_npc_turn(self):
+    def _combat_npc_decide(self):
         eval_fn = combat.EVAL_FUNCTIONS[self.combat_eval]
         action, dbg = combat.choose_npc_action(
             self.combat, algorithm=self.combat_algo, depth=self.combat_depth, eval_fn=eval_fn)
-        self.combat = combat.apply_action(self.combat, action)
         self.combat_debug = dbg
-        self.combat_log.append(f"NPC -> {combat.ACTION_LABEL[action]}")
+        self.combat_pending_action = action
+        self.combat_turn_timer = COMBAT_TURN_DELAY
+        self.combat_log.append(f"Giliran NPC... ({combat.ACTION_LABEL[action]}?)")
+
+    def _combat_npc_resolve(self):
+        action = self.combat_pending_action
+        self.combat_pending_action = None
+        self.combat, event = combat.apply_action(self.combat, action)
+        self.combat_log.append(combat.describe_event(event))
         self._combat_check_end()
 
     def combat_player_action(self, action):
-        if not self.in_combat or self.combat.to_move:
+        if not self.in_combat or self.combat.to_move or self.combat_pending_action:
             return
-        self.combat = combat.apply_action(self.combat, action)
-        self.combat_log.append(f"Pemain -> {combat.ACTION_LABEL[action]}")
+        self.combat, event = combat.apply_action(self.combat, action)
+        self.combat_log.append(combat.describe_event(event))
         if not self._combat_check_end() and self.combat.to_move:
-            self.combat_npc_turn()
+            self._combat_npc_decide()
 
+    def _poll_combat(self, dt):
+        if not self.in_combat or self.combat_pending_action is None:
+            return
+        self.combat_turn_timer -= dt
+        if self.combat_turn_timer <= 0:
+            self._combat_npc_resolve()
+    
     def _combat_check_end(self):
         """Kalau pertarungan sudah terminal: tampilkan hasil & kembali ke peta
         (posisi direset seperti sebelumnya). Return True kalau sudah berakhir."""
@@ -1086,7 +1104,13 @@ class Game:
         if self.combat_debug:
             y = combat.render_combat_debug_card(box, self.font_bold, self.font_tiny, pad, y, W - 2 * pad, self.combat_debug)
 
-        box.blit(self.font_small.render("1 Serang   2 Bertahan   3 Pulihkan   4 Tangkis", True, (255, 220, 110)), (pad, H - 28))
+        if self.combat_pending_action:
+            prompt = f"Giliran NPC... ({self.combat_turn_timer:.1f}s)"
+            color = (170, 190, 170)
+        else:
+            prompt = "1 Serang   2 Bertahan   3 Pulihkan   4 Tangkis"
+            color = (255, 220, 110)
+        box.blit(self.font_small.render(prompt, True, color), (pad, H - 28))
         self.screen.blit(box, (x0, y0))
 
     def draw(self):
@@ -1234,6 +1258,7 @@ class Game:
                     self.handle_click(event.pos)
 
             self._poll_continuous_movement(dt)
+            self._poll_combat(dt)
 
             if not self.turn_based and self.chase_mode == "auto" and not self.in_combat:
                 self.npc_timer += dt * 1000

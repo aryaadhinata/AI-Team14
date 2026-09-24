@@ -52,20 +52,84 @@ from enum import Enum
 
 PLAYER_MAX_HP = 100
 NPC_MAX_HP = 100
+ATTACK_DMG_MIN, ATTACK_DMG_MAX = 5, 10       # poin damage saat serangan BERHASIL
+ATTACK_DMG_WEIGHTS = [13, 8, 5, 3, 2, 1]     # bobot utk nilai 5,6,7,8,9,10 berurutan (10 paling jarang)
+ATTACK_HIT_BASE, ATTACK_HIT_CAP = 0.70, 0.85  # peluang serangan berhasil: 70% -> naik fibonacci -> maks 85%
 
-ATTACK_DMG = 5
-DEFEND_REDUCTION = 0.5      # damage masuk dikali ini kalau korban DEFEND giliran lalu
-HEAL_AMOUNT = 15
-PARRY_COUNTER_DMG = 10      # damage balik ke penyerang kalau korban PARRY giliran lalu
+DEFEND_BASE_PENETRATION = 0.2   # bertahan pertama kali: cuma 20% damage yang masuk
+DEFEND_CAP_PENETRATION = 1.0    # makin sering bertahan BERUNTUN, makin tembus (fibonacci), maks 100%
+
+HEAL_BASE = 15
+HEAL_CHANCE_BASE, HEAL_CHANCE_CAP = 0.10, 0.95  # peluang heal berhasil: 10% -> naik fibonacci -> maks 95%
+HEAL_BONUS_CHANCE = 0.25         # peluang dapat heal "kritikal" di atas nilai dasar
+HEAL_MULT_MIN, HEAL_MULT_MAX = 1.10, 1.67
+HEAL_MULT_WEIGHTS = [13, 8, 5, 3, 2, 1]      # sama polanya: 1.10 paling umum, 1.67 paling jarang
+
+PARRY_REFLECT_MIN, PARRY_REFLECT_MAX = 0.5, 2.0   # tangkisan: pantulkan 0.5x - 2x damage yg masuk, uniform
+
+FIB_TERMS = 8            # panjang deret fibonacci yang dipakai sbg "kurva" kenaikan peluang
+HP_LEVEL_BUCKET = 12      # tiap 12 HP hilang = naik 1 "level" di kurva fibonacci
+
 MAX_TURNS = 20               # batas ronde -> batas kedalaman tree (lihat TERMINAL TEST)
 
+
+def _fibonacci(n_terms):
+    fibs = [1, 1]
+    while len(fibs) < n_terms:
+        fibs.append(fibs[-1] + fibs[-2])
+    return fibs
+
+
+_FIB = _fibonacci(FIB_TERMS)   # [1, 1, 2, 3, 5, 8, 13, 21]
+_FIB_MAX = _FIB[-1]
+
+
+def _fib_ramp(level, base, cap):
+    """level=0 -> TEPAT base, level maksimum -> TEPAT cap, naik mengikuti fibonacci."""
+    idx = max(0, min(int(level), len(_FIB) - 1))
+    span = _FIB[-1] - _FIB[0]
+    ratio = (_FIB[idx] - _FIB[0]) / span
+    return base + (cap - base) * ratio
+
+
+def _hp_level(current_hp, max_hp=100, bucket=HP_LEVEL_BUCKET):
+    missing = max_hp - max(0, current_hp)
+    return missing // bucket
+
+
+def attack_hit_chance(attacker_hp):
+    return _fib_ramp(_hp_level(attacker_hp), ATTACK_HIT_BASE, ATTACK_HIT_CAP)
+
+
+def heal_chance(healer_hp):
+    return _fib_ramp(_hp_level(healer_hp), HEAL_CHANCE_BASE, HEAL_CHANCE_CAP)
+
+
+def defend_penetration(streak):
+    return _fib_ramp(streak, DEFEND_BASE_PENETRATION, DEFEND_CAP_PENETRATION)
+
+
+_ATTACK_DMG_VALUES = list(range(ATTACK_DMG_MIN, ATTACK_DMG_MAX + 1))
+_HEAL_MULT_VALUES = [round(HEAL_MULT_MIN + i * (HEAL_MULT_MAX - HEAL_MULT_MIN) / 5, 2) for i in range(6)]
+
+
+def roll_attack_damage():
+    return random.choices(_ATTACK_DMG_VALUES, weights=ATTACK_DMG_WEIGHTS, k=1)[0]
+
+
+def roll_heal_multiplier():
+    return random.choices(_HEAL_MULT_VALUES, weights=HEAL_MULT_WEIGHTS, k=1)[0]
+
+
+EXPECTED_ATTACK_DMG = sum(v * w for v, w in zip(_ATTACK_DMG_VALUES, ATTACK_DMG_WEIGHTS)) / sum(ATTACK_DMG_WEIGHTS)
+EXPECTED_HEAL_MULT = sum(v * w for v, w in zip(_HEAL_MULT_VALUES, HEAL_MULT_WEIGHTS)) / sum(HEAL_MULT_WEIGHTS)
+EXPECTED_PARRY_MULT = (PARRY_REFLECT_MIN + PARRY_REFLECT_MAX) / 2
 
 class Action(Enum):
     ATTACK = "attack"
     DEFEND = "defend"
     HEAL = "heal"
     PARRY = "parry"
-
 
 ACTIONS = [Action.ATTACK, Action.DEFEND, Action.HEAL, Action.PARRY]  # urutan default
 
@@ -74,6 +138,25 @@ ACTION_LABEL = {
     Action.HEAL: "Pulihkan", Action.PARRY: "Tangkis",
 }
 
+def describe_event(event) -> str:
+    actor = "NPC" if event["actor"] == "npc" else "Pemain"
+    a = event["action"]
+    if a == Action.ATTACK:
+        if event["hit"] is False:
+            return f"{actor} menyerang -> MELESET!"
+        if event.get("reflect"):
+            return f"{actor} menyerang tapi DITANGKIS! kena balik {event['reflect']} dmg"
+        return f"{actor} menyerang -> kena {event['damage']} damage"
+    if a == Action.HEAL:
+        if event["heal"] == 0:
+            return f"{actor} mencoba memulihkan diri -> GAGAL"
+        tag = " (KRITIKAL!)" if event["bonus_heal"] else ""
+        return f"{actor} memulihkan diri +{event['heal']} HP{tag}"
+    if a == Action.DEFEND:
+        return f"{actor} bersiap bertahan"
+    if a == Action.PARRY:
+        return f"{actor} bersiap menangkis"
+    return f"{actor} -> {a.value}"
 
 # ---------------------------------------------------------------------------
 # 2. STATE
@@ -87,6 +170,10 @@ class CombatState:
     to_move: bool                  # True = giliran NPC (MAX), False = giliran pemain (MIN)
     player_last: "Action | None" = None
     npc_last: "Action | None" = None
+    player_defend_streak: int = 0
+    npc_defend_streak: int = 0
+    player_last_dmg_taken: int = 0
+    npc_last_dmg_taken: int = 0
 
     def is_terminal(self):
         return self.player_hp <= 0 or self.npc_hp <= 0 or self.turn >= MAX_TURNS
@@ -110,44 +197,131 @@ def new_combat(player_hp=PLAYER_MAX_HP, npc_hp=NPC_MAX_HP, npc_starts=True):
 # 3. TRANSITION FUNCTION — RESULT(s, a)
 # ---------------------------------------------------------------------------
 
-def apply_action(state: CombatState, action: Action) -> CombatState:
-    """Terapkan satu aksi milik pihak yang sedang bergiliran (state.to_move),
-    kembalikan state baru. Giliran penuh (turn) bertambah setelah PEMAIN
-    bergerak, jadi satu 'turn' = satu ronde (NPC lalu pemain)."""
+def apply_action(state: CombatState, action: Action):
+    """Terapkan aksi pihak yang bergiliran DENGAN RNG ASLI — dipakai pertarungan
+    sungguhan (game.py) & simulate_combat(). Return (state_baru, event) dengan
+    event = dict info buat log ('kena 8 damage', 'meleset', dst).
+    !! Pencarian NPC (minimax/alpha-beta/dst) TIDAK memakai fungsi ini — mereka
+    memakai apply_action_expected() di bawah supaya pohon tetap deterministik."""
     player_hp, npc_hp = state.player_hp, state.npc_hp
     player_last, npc_last = state.player_last, state.npc_last
+    p_streak, n_streak = state.player_defend_streak, state.npc_defend_streak
+    p_last_dmg, n_last_dmg = state.player_last_dmg_taken, state.npc_last_dmg_taken
+    event = {"action": action, "hit": None, "damage": 0, "reflect": 0, "heal": 0, "bonus_heal": False}
 
-    if state.to_move:  # --- giliran NPC ---
-        opp_last = player_last
+    if state.to_move:  # ---- giliran NPC ----
+        event["actor"] = "npc"
         if action == Action.ATTACK:
-            if opp_last == Action.PARRY:
-                npc_hp -= PARRY_COUNTER_DMG          # tangkisan pemain berhasil
-            else:
-                dmg = ATTACK_DMG
-                if opp_last == Action.DEFEND:
-                    dmg = int(dmg * DEFEND_REDUCTION)
-                player_hp -= dmg
+            hit = random.random() < attack_hit_chance(npc_hp)
+            event["hit"] = hit
+            if hit:
+                dmg = roll_attack_damage()
+                if player_last == Action.PARRY:
+                    reflect = round(dmg * random.uniform(PARRY_REFLECT_MIN, PARRY_REFLECT_MAX))
+                    npc_hp -= reflect
+                    n_last_dmg = reflect
+                    event["reflect"] = reflect
+                else:
+                    if player_last == Action.DEFEND:
+                        dmg = round(dmg * defend_penetration(p_streak))
+                    player_hp -= dmg
+                    p_last_dmg = dmg
+                    event["damage"] = dmg
         elif action == Action.HEAL:
-            npc_hp = min(NPC_MAX_HP, npc_hp + HEAL_AMOUNT)
+            if random.random() < heal_chance(npc_hp):
+                if random.random() < HEAL_BONUS_CHANCE:
+                    healed = round((HEAL_BASE + (n_last_dmg or 5)) * roll_heal_multiplier())
+                    event["bonus_heal"] = True
+                else:
+                    healed = HEAL_BASE
+                npc_hp = min(NPC_MAX_HP, npc_hp + healed)
+                event["heal"] = healed
+        n_streak = n_streak + 1 if action == Action.DEFEND else 0
         npc_last = action
-    else:  # --- giliran pemain ---
-        opp_last = npc_last
+    else:  # ---- giliran pemain ----
+        event["actor"] = "player"
         if action == Action.ATTACK:
-            if opp_last == Action.PARRY:
-                player_hp -= PARRY_COUNTER_DMG        # tangkisan NPC berhasil
-            else:
-                dmg = ATTACK_DMG
-                if opp_last == Action.DEFEND:
-                    dmg = int(dmg * DEFEND_REDUCTION)
-                npc_hp -= dmg
+            hit = random.random() < attack_hit_chance(player_hp)
+            event["hit"] = hit
+            if hit:
+                dmg = roll_attack_damage()
+                if npc_last == Action.PARRY:
+                    reflect = round(dmg * random.uniform(PARRY_REFLECT_MIN, PARRY_REFLECT_MAX))
+                    player_hp -= reflect
+                    p_last_dmg = reflect
+                    event["reflect"] = reflect
+                else:
+                    if npc_last == Action.DEFEND:
+                        dmg = round(dmg * defend_penetration(n_streak))
+                    npc_hp -= dmg
+                    n_last_dmg = dmg
+                    event["damage"] = dmg
         elif action == Action.HEAL:
-            player_hp = min(PLAYER_MAX_HP, player_hp + HEAL_AMOUNT)
+            if random.random() < heal_chance(player_hp):
+                if random.random() < HEAL_BONUS_CHANCE:
+                    healed = round((HEAL_BASE + (p_last_dmg or 5)) * roll_heal_multiplier())
+                    event["bonus_heal"] = True
+                else:
+                    healed = HEAL_BASE
+                player_hp = min(PLAYER_MAX_HP, player_hp + healed)
+                event["heal"] = healed
+        p_streak = p_streak + 1 if action == Action.DEFEND else 0
         player_last = action
 
     new_turn = state.turn + (1 if not state.to_move else 0)
-    return CombatState(max(player_hp, 0), max(npc_hp, 0), new_turn,
-                        not state.to_move, player_last, npc_last)
+    new_state = CombatState(max(player_hp, 0), max(npc_hp, 0), new_turn, not state.to_move,
+                            player_last, npc_last, p_streak, n_streak, p_last_dmg, n_last_dmg)
+    return new_state, event
 
+
+def apply_action_expected(state: CombatState, action: Action) -> CombatState:
+    """Versi DETERMINISTIK (nilai harapan / expected value, TANPA RNG) dari
+    apply_action — dipakai HANYA oleh minimax/alpha-beta/early-stop/expectimax
+    supaya NPC tetap bisa mikir beberapa langkah ke depan tanpa pohonnya
+    meledak/berubah-ubah karena RNG. Tidak menghasilkan event (bukan buat log)."""
+    player_hp, npc_hp = state.player_hp, state.npc_hp
+    player_last, npc_last = state.player_last, state.npc_last
+    p_streak, n_streak = state.player_defend_streak, state.npc_defend_streak
+
+    def expected_heal(hp):
+        p_heal = heal_chance(hp)
+        e_amount = ((1 - HEAL_BONUS_CHANCE) * HEAL_BASE
+                    + HEAL_BONUS_CHANCE * (HEAL_BASE + 5) * EXPECTED_HEAL_MULT)
+        return p_heal * e_amount
+
+    if state.to_move:
+        if action == Action.ATTACK:
+            p_hit = attack_hit_chance(npc_hp)
+            if player_last == Action.PARRY:
+                npc_hp -= p_hit * EXPECTED_ATTACK_DMG * EXPECTED_PARRY_MULT
+            else:
+                dmg = p_hit * EXPECTED_ATTACK_DMG
+                if player_last == Action.DEFEND:
+                    dmg *= defend_penetration(p_streak)
+                player_hp -= dmg
+        elif action == Action.HEAL:
+            npc_hp = min(NPC_MAX_HP, npc_hp + expected_heal(npc_hp))
+        n_streak = n_streak + 1 if action == Action.DEFEND else 0
+        npc_last = action
+    else:
+        if action == Action.ATTACK:
+            p_hit = attack_hit_chance(player_hp)
+            if npc_last == Action.PARRY:
+                player_hp -= p_hit * EXPECTED_ATTACK_DMG * EXPECTED_PARRY_MULT
+            else:
+                dmg = p_hit * EXPECTED_ATTACK_DMG
+                if npc_last == Action.DEFEND:
+                    dmg *= defend_penetration(n_streak)
+                npc_hp -= dmg
+        elif action == Action.HEAL:
+            player_hp = min(PLAYER_MAX_HP, player_hp + expected_heal(player_hp))
+        p_streak = p_streak + 1 if action == Action.DEFEND else 0
+        player_last = action
+
+    new_turn = state.turn + (1 if not state.to_move else 0)
+    return CombatState(max(player_hp, 0), max(npc_hp, 0), new_turn, not state.to_move,
+                        player_last, npc_last, p_streak, n_streak,
+                        state.player_last_dmg_taken, state.npc_last_dmg_taken)
 
 # ---------------------------------------------------------------------------
 # 4. UTILITY (state terminal)
@@ -219,14 +393,14 @@ def minimax(state, depth, eval_fn, action_order, counters):
     if state.to_move:  # NPC = MAX
         best_val = -math.inf
         for a in action_order:
-            val, _ = minimax(apply_action(state, a), depth - 1, eval_fn, action_order, counters)
+            val, _ = minimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters)
             if val > best_val:
                 best_val, best_action = val, a
         return best_val, best_action
     else:  # pemain diasumsikan optimal = MIN (skenario terburuk buat NPC)
         best_val = math.inf
         for a in action_order:
-            val, _ = minimax(apply_action(state, a), depth - 1, eval_fn, action_order, counters)
+            val, _ = minimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters)
             if val < best_val:
                 best_val, best_action = val, a
         return best_val, best_action
@@ -242,7 +416,7 @@ def alphabeta(state, depth, alpha, beta, eval_fn, action_order, counters):
     if state.to_move:
         best_val = -math.inf
         for a in action_order:
-            val, _ = alphabeta(apply_action(state, a), depth - 1, alpha, beta, eval_fn, action_order, counters)
+            val, _ = alphabeta(apply_action_expected(state, a), depth - 1, alpha, beta, eval_fn, action_order, counters)
             if val > best_val:
                 best_val, best_action = val, a
             alpha = max(alpha, best_val)
@@ -253,7 +427,7 @@ def alphabeta(state, depth, alpha, beta, eval_fn, action_order, counters):
     else:
         best_val = math.inf
         for a in action_order:
-            val, _ = alphabeta(apply_action(state, a), depth - 1, alpha, beta, eval_fn, action_order, counters)
+            val, _ = alphabeta(apply_action_expected(state, a), depth - 1, alpha, beta, eval_fn, action_order, counters)
             if val < best_val:
                 best_val, best_action = val, a
             beta = min(beta, best_val)
@@ -278,7 +452,7 @@ def alphabeta_early_stop(state, depth, alpha, beta, eval_fn, action_order, count
         for a in action_order:
             if counters["nodes"] >= budget:
                 break
-            val, _ = alphabeta_early_stop(apply_action(state, a), depth - 1, alpha, beta,
+            val, _ = alphabeta_early_stop(apply_action_expected(state, a), depth - 1, alpha, beta,
                                             eval_fn, action_order, counters, budget)
             if val > best_val:
                 best_val, best_action = val, a
@@ -292,7 +466,7 @@ def alphabeta_early_stop(state, depth, alpha, beta, eval_fn, action_order, count
         for a in action_order:
             if counters["nodes"] >= budget:
                 break
-            val, _ = alphabeta_early_stop(apply_action(state, a), depth - 1, alpha, beta,
+            val, _ = alphabeta_early_stop(apply_action_expected(state, a), depth - 1, alpha, beta,
                                             eval_fn, action_order, counters, budget)
             if val < best_val:
                 best_val, best_action = val, a
@@ -315,7 +489,7 @@ def expectimax(state, depth, eval_fn, action_order, counters, player_policy=None
     if state.to_move:  # NPC tetap MAX
         best_val, best_action = -math.inf, None
         for a in action_order:
-            val, _ = expectimax(apply_action(state, a), depth - 1, eval_fn, action_order, counters, player_policy)
+            val, _ = expectimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters, player_policy)
             if val > best_val:
                 best_val, best_action = val, a
         return best_val, best_action
@@ -326,7 +500,7 @@ def expectimax(state, depth, eval_fn, action_order, counters, player_policy=None
             p = probs.get(a, 0.0)
             if p == 0.0:
                 continue
-            val, _ = expectimax(apply_action(state, a), depth - 1, eval_fn, action_order, counters, player_policy)
+            val, _ = expectimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters, player_policy)
             exp_val += p * val
         return exp_val, None
 
@@ -356,7 +530,7 @@ def choose_npc_action(state, algorithm="alphabeta", depth=4, eval_fn=eval_hp_dif
     t0 = time.perf_counter()
 
     for a in order:
-        child = apply_action(state, a)
+        child = apply_action_expected(state, a)
         if algorithm == "minimax":
             val, _ = minimax(child, depth - 1, eval_fn, order, counters)
         elif algorithm == "alphabeta":
@@ -469,8 +643,8 @@ def simulate_combat(algorithm="alphabeta", depth=4, eval_fn=eval_hp_diff,
         else:
             action = player_fn(state)
             dbg = None
-        state = apply_action(state, action)
-        log.append((("npc" if not state.to_move else "player"), action, state, dbg))
+        state, event = apply_action(state, action)
+        log.append((("npc" if not state.to_move else "player"), action, state, dbg, event))
         if verbose:
             who = "NPC" if dbg else "Pemain"
             print(f"  {who:8s} -> {action.value:8s}  | player_hp={state.player_hp:3d} npc_hp={state.npc_hp:3d}")

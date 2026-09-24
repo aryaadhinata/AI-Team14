@@ -53,7 +53,7 @@ from enum import Enum
 PLAYER_MAX_HP = 100
 NPC_MAX_HP = 100
 ATTACK_DMG_MIN, ATTACK_DMG_MAX = 10, 25      # poin damage saat serangan BERHASIL
-ATTACK_DMG_WEIGHTS = [13, 8, 5, 3, 2, 1]     # bobot utk nilai 5,6,7,8,9,10 berurutan (10 paling jarang)
+ATTACK_DMG_WEIGHTS = [13, 8, 5, 3, 2, 1]     # bobot utk nilai 10,13,16,19,22,25 berurutan (10 paling jarang)
 ATTACK_HIT_BASE, ATTACK_HIT_CAP = 0.70, 0.85  # peluang serangan berhasil: 70% -> naik fibonacci -> maks 85%
 
 DEFEND_BASE_PENETRATION = 0.2   # bertahan pertama kali: cuma 20% damage yang masuk

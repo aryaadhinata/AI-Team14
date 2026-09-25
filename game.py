@@ -12,6 +12,7 @@ Kontrol:
     - H             : ganti heuristik A* (manhattan/euclidean/chebyshev/octile)
     - G             : nyala/mati gerak diagonal (8 arah)
     - E             : mode DEBUG — tampilkan node yang dieksplorasi + jalur
+    - L             : ganti angka di petak saat debug (urutan / g / h / f / panah / mati)
     - M             : ganti mode kejar NPC (otomatis / manual) — real-time saja
     - T             : ganti mode REAL-TIME <-> TURN-BASED (giliran)
     - F             : layar penuh / jendela
@@ -30,6 +31,8 @@ import time
 
 import pygame
 
+import pertarungan as combat  # logika pertarungan giliran (minimax/alpha-beta/dll)
+
 # ---------------------------------------------------------------------------
 # Konfigurasi dasar
 # ---------------------------------------------------------------------------
@@ -38,12 +41,21 @@ ROWS, COLS, CELL = int(16*1.2), int(22*1.2), int(32*1.2)
 # Tipe medan
 GRASS, TREE, PROP, BUSH = 0, 1, 2, 3
 BUSH_COST = 3  # biaya melintasi semak dalam pathfinding (dulunya sungai)
+BUSH_PATCH_COUNT = (4, 6)   # jumlah lingkaran semak per peta (min, maks)
+BUSH_RADIUS = (2.0, 3.0)    # jari-jari tiap lingkaran semak (dalam petak)
 
-CHAR_W = CELL           # lebar karakter = 1 petak
-CHAR_H = CELL * 2        # tinggi karakter = 2 petak  -> dimensi 1x2
-
-SCREEN_W, SCREEN_H = COLS * CELL, ROWS * CELL + 112  # ruang HUD bawah
+MAP_W, MAP_H = COLS * CELL, ROWS * CELL
+PANEL_W = 340                                # lebar dashboard di sisi kanan peta
+SCREEN_W, SCREEN_H = MAP_W + PANEL_W, MAP_H
 FPS = 60
+CHAR_H = int(CELL * 1.2)  # tinggi render karakter (px) — sprite TX_Player.png diskalakan ke tinggi ini
+# Debug: isi angka di tiap petak (ganti dengan tombol L) & warna node yang di-expand
+LABEL_MODES = ["order", "g", "h", "f", "arrow", "off"]
+LABEL_NAMES = {
+    "order": "urutan expand", "g": "g (biaya dari NPC)", "h": "h (perkiraan ke target)",
+    "f": "f = g + h", "arrow": "panah ke induk", "off": "tanpa angka",
+}
+EXPAND_START, EXPAND_END = (70, 100, 230), (60, 230, 200)  # biru (awal) -> tosca (akhir)
 
 HEURISTIC_NAMES = ["octile", "manhattan", "euclidean", "chebyshev"]
 
@@ -55,6 +67,7 @@ SS = 2  # faktor supersampling untuk gambar karakter (dirender besar lalu diperk
 # --- Kecepatan gerak (ms per petak) ---
 PLAYER_STEP_MS = 130         # kecepatan jalan normal pemain (tahan tombol)
 NPC_STEP_MS_DEFAULT = 220    # kecepatan jalan normal NPC (real-time)
+COMBAT_TURN_DELAY = 0.8      # jeda (detik) sebelum giliran NPC di pertarungan dieksekusi
 BUSH_SLOW_MULT = 2.1         # pengali cooldown langkah saat berada di petak semak
 
 
@@ -285,8 +298,9 @@ HEURISTICS = {
 
 
 def search(grid, start, goal, diagonal, heuristic_fn):
-    """A* generik; UCS = A* dengan heuristik nol. Mengembalikan dict hasil,
-    termasuk 'visited' berisi SEMUA node yang sudah di-expand (dipakai mode debug)."""
+    """A* generik; UCS = A* dengan heuristik nol. Selain jalur, hasilnya memuat
+    data debug: 'visited' (node yang di-expand, berurutan), 'frontier' (open list
+    yang belum di-expand) dan 'info' {node: (urutan, g, h, induk)}."""
     t0 = time.perf_counter()
     g_score = {start: 0.0}
     came_from = {}
@@ -294,7 +308,28 @@ def search(grid, start, goal, diagonal, heuristic_fn):
     open_heap = [(heuristic_fn(start, goal), counter, start)]
     closed = set()
     visited = []
+    info = {}
+    generated = 1  # berapa kali node dimasukkan ke open list
     nodes_expanded = 0
+
+    def pack(path, cost):
+        frontier = []
+        for _, _, n in open_heap:
+            if n not in closed and n not in info:
+                info[n] = (None, g_score[n], heuristic_fn(n, goal), came_from.get(n))
+                frontier.append(n)
+        return {
+            "path": path,
+            "cost": cost,
+            "nodes": nodes_expanded,
+            "time_ms": (time.perf_counter() - t0) * 1000,
+            "visited": visited,
+            "frontier": frontier,
+            "info": info,
+            "generated": generated,
+            "start": start,
+            "goal": goal,
+        }
 
     while open_heap:
         f, _, current = heapq.heappop(open_heap)
@@ -303,6 +338,7 @@ def search(grid, start, goal, diagonal, heuristic_fn):
         closed.add(current)
         nodes_expanded += 1
         visited.append(current)
+        info[current] = (nodes_expanded, g_score[current], heuristic_fn(current, goal), came_from.get(current))
 
         if current == goal:
             path = [current]
@@ -311,13 +347,7 @@ def search(grid, start, goal, diagonal, heuristic_fn):
                 k = came_from[k]
                 path.append(k)
             path.reverse()
-            return {
-                "path": path,
-                "cost": g_score[current],
-                "nodes": nodes_expanded,
-                "time_ms": (time.perf_counter() - t0) * 1000,
-                "visited": visited,
-            }
+            return pack(path, g_score[current])
 
         for nr, nc in neighbors_of(grid, *current, diagonal):
             nb = (nr, nc)
@@ -328,15 +358,10 @@ def search(grid, start, goal, diagonal, heuristic_fn):
                 g_score[nb] = g2
                 came_from[nb] = current
                 counter += 1
+                generated += 1
                 heapq.heappush(open_heap, (g2 + heuristic_fn(nb, goal), counter, nb))
 
-    return {
-        "path": None,
-        "cost": math.inf,
-        "nodes": nodes_expanded,
-        "time_ms": (time.perf_counter() - t0) * 1000,
-        "visited": visited,
-    }
+    return pack(None, math.inf)
 
 
 # ---------------------------------------------------------------------------
@@ -373,21 +398,34 @@ def place_trees(g):
         placed += 1
 
 
-def place_bush_band(g):
-    """Pengganti sungai: jalur semak yang lebar & rimbun, tetap bisa dilewati
-    (dengan biaya lebih mahal), meliuk dari atas ke bawah peta."""
-    c = 4 + random.randint(0, COLS - 14 - 1)
-    drift = 0
-    for r in range(ROWS):
-        drift += random.choice([-1, 0, 1])
-        drift = max(-1, min(1, drift))
-        c = max(1, min(COLS - 8, c + drift))
-        width = random.choice([5, 6, 6, 7])  # dilebarkan lagi dari revisi sebelumnya
-        for w in range(width):
-            cc = c + w
-            if in_bounds(r, cc):
-                g[r][cc] = BUSH
-
+def place_bush_patches(g, keep_away):
+    """Semak berupa beberapa LINGKARAN terpisah (bukan lagi satu jalur panjang).
+    Tiap lingkaran bisa dilewati tapi mahal (BUSH_COST), jadi pathfinder harus
+    memilih: menerobos semak atau memutar lewat rumput. Di sinilah beda
+    heuristik terlihat (jumlah node, bentuk jalur, biaya).
+    Lingkaran pertama sengaja di tengah-atas peta (tepat di jalur lurus antara
+    pemain & NPC); sisanya acak dan tidak saling menempel."""
+    circles = []  # (baris pusat, kolom pusat, jari-jari)
+    target = random.randint(*BUSH_PATCH_COUNT)
+    tries = 0
+    while len(circles) < target and tries < 300:
+        tries += 1
+        rad = random.uniform(*BUSH_RADIUS)
+        if not circles:
+            cr, cc = random.randint(1, 2), COLS // 2 + random.randint(-3, 3)
+        else:
+            m = math.ceil(rad)  # pusat dijaga agar lingkaran utuh di dalam peta
+            cr, cc = random.randint(m, ROWS - 1 - m), random.randint(m, COLS - 1 - m)
+        if any(math.hypot(cr - sr, cc - sc) < rad + 2.5 for sr, sc in keep_away):
+            continue  # jangan menutupi titik spawn
+        if any(math.hypot(cr - r2, cc - c2) < rad + rad2 + 1.5 for r2, c2, rad2 in circles):
+            continue  # sisakan celah rumput antar lingkaran
+        circles.append((cr, cc, rad))
+    for cr, cc, rad in circles:
+        for r in range(ROWS):
+            for c in range(COLS):
+                if math.hypot(r - cr, c - cc) <= rad:
+                    g[r][c] = BUSH
 
 def count_passable(g):
     return sum(1 for r in range(ROWS) for c in range(COLS) if g[r][c] not in (TREE, PROP))
@@ -416,7 +454,8 @@ def largest_component_size(g):
     return best
 
 
-FIXED_PLAYER_SPAWN = (1, 1)
+FIXED_PLAYER_SPAWN = (ROWS // 2, 3)          # kiri, tengah vertikal, 3 petak dari tepi peta
+FIXED_NPC_SPAWN = (ROWS // 2, COLS - 1 - 3)  # kanan, tengah vertikal, 3 petak dari tepi peta
 
 
 def nearest_passable_cell(passable, tr, tc):
@@ -432,7 +471,7 @@ def generate_map():
     g = blank_grid()
     while True:
         g = blank_grid()
-        place_bush_band(g)
+        place_bush_patches(g, [FIXED_PLAYER_SPAWN, FIXED_NPC_SPAWN])
         place_props(g)
         place_trees(g)
         attempts += 1
@@ -455,6 +494,21 @@ class Game:
         self.font_small = pygame.font.SysFont("consolas", 13)
         self.font_tiny = pygame.font.SysFont("consolas", 11)
         self.assets = Assets()
+        
+        self.font_bold = pygame.font.SysFont("consolas", 14, bold=True)
+        self.font_title = pygame.font.SysFont("consolas", 18, bold=True)
+
+        # state tampilan debug / dashboard
+        self.label_mode = 0        # indeks LABEL_MODES (angka di petak saat debug), tombol L
+        self._dbg_layer = None     # cache lapisan debug: dibangun ulang hanya saat hasil/label berubah
+        self._dbg_res = None
+        self._dbg_label = None
+        self._compare_key = None   # cache tabel perbandingan algoritma
+        self._compare_rows = []
+        self._dim_layer = pygame.Surface((MAP_W, MAP_H), pygame.SRCALPHA)
+        self._dim_layer.fill((0, 0, 0, 70))           # redupkan peta saat debug supaya warna node menonjol
+        self._bush_tint = pygame.Surface((CELL, CELL), pygame.SRCALPHA)
+        self._bush_tint.fill((10, 50, 25, 85))        # alas gelap tipis di petak semak
 
         self.algo = "astar"          # "astar" | "ucs"
         self.heuristic = "octile"
@@ -467,6 +521,7 @@ class Game:
         self.npc_step_delay = NPC_STEP_MS_DEFAULT  # delay efektif langkah berikutnya (melambat di semak)
         self.npc_timer = 0.0
 
+
         # cooldown langkah pemain (utk tahan tombol) — melambat di semak
         self.player_timer = PLAYER_STEP_MS
         self.player_step_ms = PLAYER_STEP_MS
@@ -476,6 +531,17 @@ class Game:
         self.toast_text = ""
         self.toast_until = 0.0
 
+        # --- pertarungan (dipicu saat NPC menangkap pemain, lihat on_capture) ---
+        self.in_combat = False
+        self.combat = None            # pertarungan.CombatState
+        self.combat_log = []          # beberapa baris log aksi terakhir (ditampilkan di modal)
+        self.combat_debug = None      # hasil choose_npc_action() terakhir -> overlay debug
+        self.combat_algo = "alphabeta"          # "minimax" | "alphabeta" | "early_stop" | "expectimax"
+        self.combat_depth = 4
+        self.combat_eval = "hp_diff"            # kunci ke combat.EVAL_FUNCTIONS
+        self.combat_pending_action = None       # aksi NPC yg sudah diputuskan, menunggu delay sebelum dieksekusi
+        self.combat_turn_timer = 0.0
+        
         # arah hadap & animasi
         self.player_facing = "front"
         self.npc_facing = "front"
@@ -493,9 +559,8 @@ class Game:
     # ---------------- Map lifecycle ----------------
     def new_map(self):
         self.grid, self.passable = generate_map()
-        spawn = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
-        self.player = spawn
-        self.npc = farthest_passable_cell(self.passable, self.player)
+        self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
+        self.npc = nearest_passable_cell(self.passable, *FIXED_NPC_SPAWN)
         self.last_result = None
         self.npc_path = None
         self.player_step_ms = PLAYER_STEP_MS
@@ -505,9 +570,8 @@ class Game:
         self.recompute_npc_path()
 
     def respawn(self):
-        spawn = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
-        self.player = spawn
-        self.npc = farthest_passable_cell(self.passable, self.player)
+        self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
+        self.npc = nearest_passable_cell(self.passable, *FIXED_NPC_SPAWN)
         self.player_step_ms = PLAYER_STEP_MS
         self.npc_step_delay = self.speed_ms
         self.player_timer = self.player_step_ms
@@ -527,8 +591,61 @@ class Game:
         self.toast_until = time.perf_counter() + duration
 
     def on_capture(self):
-        self.show_toast("NPC menangkap pemain! Posisi direset.")
+        self.start_combat()
+
+    def start_combat(self):
+        self.in_combat = True
+        self.combat = combat.new_combat()
+        self.combat_log = ["NPC menangkap pemain — pertarungan dimulai!"]
+        self.combat_debug = None
+        self.combat_pending_action = None
+        if self.combat.to_move:
+            self._combat_npc_decide()
+
+    def _combat_npc_decide(self):
+        eval_fn = combat.EVAL_FUNCTIONS[self.combat_eval]
+        action, dbg = combat.choose_npc_action(
+            self.combat, algorithm=self.combat_algo, depth=self.combat_depth, eval_fn=eval_fn)
+        self.combat_debug = dbg
+        self.combat_pending_action = action
+        self.combat_turn_timer = COMBAT_TURN_DELAY
+        self.combat_log.append(f"Giliran NPC... ({combat.ACTION_LABEL[action]}?)")
+
+    def _combat_npc_resolve(self):
+        action = self.combat_pending_action
+        self.combat_pending_action = None
+        self.combat, event = combat.apply_action(self.combat, action)
+        self.combat_log.append(combat.describe_event(event))
+        self._combat_check_end()
+
+    def combat_player_action(self, action):
+        if not self.in_combat or self.combat.to_move or self.combat_pending_action:
+            return
+        self.combat, event = combat.apply_action(self.combat, action)
+        self.combat_log.append(combat.describe_event(event))
+        if not self._combat_check_end() and self.combat.to_move:
+            self._combat_npc_decide()
+
+    def _poll_combat(self, dt):
+        if not self.in_combat or self.combat_pending_action is None:
+            return
+        self.combat_turn_timer -= dt
+        if self.combat_turn_timer <= 0:
+            self._combat_npc_resolve()
+    
+    def _combat_check_end(self):
+        """Kalau pertarungan sudah terminal: tampilkan hasil & kembali ke peta
+        (posisi direset seperti sebelumnya). Return True kalau sudah berakhir."""
+        if not self.combat.is_terminal():
+            return False
+        w = self.combat.winner()
+        msg = ("NPC menang! Posisi direset." if w is True else
+                "Pemain lolos dari pertarungan!" if w is False else
+                "Pertarungan seri (batas giliran habis).")
+        self.in_combat = False
+        self.show_toast(msg)
         self.respawn()
+        return True
 
     @staticmethod
     def _facing_from_delta(dr, dc):
@@ -589,6 +706,8 @@ class Game:
         x, y = c * CELL, r * CELL
         img = self.assets.grass[self.grass_variant[r][c]]
         self.screen.blit(img, (x, y))
+        if self.grid[r][c] == BUSH:  # batas lingkaran semak jadi terlihat jelas
+            self.screen.blit(self._bush_tint, (x, y))
 
     def _draw_tree_unit(self, r, c):
         x, y = c * CELL, r * CELL
@@ -653,50 +772,157 @@ class Game:
         units.append((
             (self.player[0], 1), self._draw_character_unit,
             (self.player, self.player_facing, self.player_last_move,
-             self.assets.player_frames, self._player_flip()),
+            self.assets.player_frames, self._player_flip()),
         ))
         units.append((
             (self.npc[0], 1), self._draw_character_unit,
             (self.npc, self.npc_facing, self.npc_last_move,
-             self.assets.enemy_frames, self._npc_flip()),
+            self.assets.enemy_frames, self._npc_flip()),
         ))
 
         units.sort(key=lambda u: u[0])
         for _, fn, args in units:
             fn(*args)
 
+    @staticmethod
+    def _lerp(c1, c2, t):
+        return tuple(int(a + (b - a) * t) for a, b in zip(c1, c2))
+
+    def _build_debug_layer(self):
+        """Gambar seluruh visual debug ke SATU lapisan transparan. Lapisan ini
+        di-cache (dibangun ulang hanya saat hasil pencarian / mode label berubah)."""
+        res = self.last_result
+        info, visited, path = res["info"], res["visited"], res["path"]
+        mode = LABEL_MODES[self.label_mode]
+        layer = pygame.Surface((MAP_W, MAP_H), pygame.SRCALPHA)
+
+        def cell_rect(cell):
+            return (cell[1] * CELL + 1, cell[0] * CELL + 1, CELL - 2, CELL - 2)
+
+        def center(cell):
+            return (cell[1] * CELL + CELL // 2, cell[0] * CELL + CELL // 2)
+
+        def fmt(v):
+            return f"{v:.0f}" if abs(v - round(v)) < 0.05 else f"{v:.1f}"
+
+        # 1) frontier (oranye): sudah ditemukan tapi belum di-expand
+        for cell in res["frontier"]:
+            layer.fill((255, 165, 50, 120), cell_rect(cell))
+            pygame.draw.rect(layer, (255, 200, 90, 255), cell_rect(cell), 2)
+
+        # 2) node di-expand: gradasi biru -> tosca menurut urutan (makin tosca = makin akhir)
+        last = max(1, len(visited) - 1)
+        for i, cell in enumerate(visited):
+            layer.fill((*self._lerp(EXPAND_START, EXPAND_END, i / last), 150), cell_rect(cell))
+
+        # 3) mode panah: garis pendek dari tiap petak menuju induknya (parent)
+        if mode == "arrow":
+            for cell, (order, g, h, parent) in info.items():
+                if parent is None:
+                    continue
+                (cx, cy), (px, py) = center(cell), center(parent)
+                d = math.hypot(px - cx, py - cy) or 1
+                ex, ey = cx + (px - cx) / d * CELL * 0.38, cy + (py - cy) / d * CELL * 0.38
+                pygame.draw.line(layer, (255, 255, 255, 255), (cx, cy), (ex, ey), 2)
+                pygame.draw.circle(layer, (255, 255, 255, 255), (int(ex), int(ey)), 3)
+
+        # 4) jalur akhir: garis kuning; titik oranye = melewati petak semak
+        if path and len(path) > 1:
+            pts = [center(p) for p in path]
+            pygame.draw.lines(layer, (30, 20, 0, 255), False, pts, 9)
+            pygame.draw.lines(layer, (255, 226, 80, 255), False, pts, 5)
+            for p, pt in zip(path, pts):
+                pygame.draw.circle(layer, (255, 226, 80, 255), pt, 3)
+                if self.grid[p[0]][p[1]] == BUSH:
+                    pygame.draw.circle(layer, (255, 110, 40, 255), pt, 6)
+                    pygame.draw.circle(layer, (30, 20, 0, 255), pt, 6, 2)
+
+        # 5) angka di tiap petak (urutan / g / h / f), diberi bayangan agar terbaca
+        if mode in ("order", "g", "h", "f"):
+            for cell, (order, g, h, parent) in info.items():
+                val = {"order": order, "g": g, "h": h, "f": g + h}[mode]
+                if val is None:  # petak frontier belum punya nomor urut
+                    continue
+                s = str(val) if mode == "order" else fmt(val)
+                txt = self.font_tiny.render(s, True, (255, 255, 255) if order else (255, 232, 180))
+                shd = self.font_tiny.render(s, True, (0, 0, 0))
+                pos = txt.get_rect(midbottom=(cell[1] * CELL + CELL // 2, cell[0] * CELL + CELL - 2))
+                layer.blit(shd, pos.move(1, 1))
+                layer.blit(txt, pos)
+
+        # 6) petak awal NPC (S, merah) & target/pemain (G, hijau)
+        for cell, col, ch in ((res["start"], (255, 90, 60), "S"), (res["goal"], (80, 220, 120), "G")):
+            x, y = cell[1] * CELL, cell[0] * CELL
+            pygame.draw.rect(layer, (*col, 255), (x, y, CELL, CELL), 3)
+            layer.fill((*col, 255), (x, y, 14, 14))
+            t = self.font_tiny.render(ch, True, (10, 10, 10))
+            layer.blit(t, t.get_rect(center=(x + 7, y + 7)))
+        return layer
+
     def draw_debug_overlay(self):
-        """Mode debug: tampilkan seluruh node yang sudah di-expand algoritma
-        pencarian (bukan cuma jalur akhir), supaya proses pencarian terlihat."""
+        """Mode debug: peta diredupkan lalu ditimpa lapisan debug (node di-expand,
+        frontier, jalur, angka). Digambar SETELAH dekor supaya semak/pohon tidak
+        menutupi node."""
         if not self.debug_mode or not self.last_result:
             return
-        visited = self.last_result["visited"]
-        if not visited:
-            return
-        total = max(1, len(visited))
-        overlay = pygame.Surface((CELL - 4, CELL - 4), pygame.SRCALPHA)
-        show_numbers = total <= 140
-        for i, (r, c) in enumerate(visited):
-            alpha = int(255 * (0.10 + 0.35 * (i / total)))
-            overlay.fill((95, 160, 220, alpha))
-            self.screen.blit(overlay, (c * CELL + 2, r * CELL + 2))
-            if show_numbers:
-                txt = self.font_small.render(str(i), True, (20, 30, 60))
-                self.screen.blit(txt, (c * CELL + 3, r * CELL + 2))
-        # jalur akhir di atas overlay biru
-        if self.npc_path and len(self.npc_path) > 1:
-            path_ov = pygame.Surface((CELL - 14, CELL - 14), pygame.SRCALPHA)
-            plen = len(self.npc_path)
-            for i, (r, c) in enumerate(self.npc_path):
-                alpha = int(255 * (0.35 + 0.45 * (i / plen)))
-                path_ov.fill((227, 173, 76, alpha))
-                self.screen.blit(path_ov, (c * CELL + 7, r * CELL + 7))
-        # tandai start (npc) & goal (player) node pencarian
-        nr, nc = self.npc
-        pr, pc = self.player
-        pygame.draw.rect(self.screen, (255, 90, 60), (nc * CELL, nr * CELL, CELL, CELL), 2)
-        pygame.draw.rect(self.screen, (80, 220, 120), (pc * CELL, pr * CELL, CELL, CELL), 2)
+        if self._dbg_res is not self.last_result or self._dbg_label != self.label_mode:
+            self._dbg_layer = self._build_debug_layer()
+            self._dbg_res, self._dbg_label = self.last_result, self.label_mode
+        self.screen.blit(self._dim_layer, (0, 0))
+        self.screen.blit(self._dbg_layer, (0, 0))
 
+    def get_compare_rows(self):
+        """Jalankan SEMUA algoritma pada soal yang sama dengan hasil terakhir
+        (start/goal yang sama) untuk tabel perbandingan. Di-cache per soal."""
+        res = self.last_result
+        key = (res["start"], res["goal"], self.diagonal, id(self.grid))
+        if key != self._compare_key:
+            rows = []
+            for name in HEURISTIC_NAMES + ["ucs"]:
+                fn = HEURISTICS["zero" if name == "ucs" else name]
+                rows.append((name, search(self.grid, res["start"], res["goal"], self.diagonal, fn)))
+            self._compare_key, self._compare_rows = key, rows
+        return self._compare_rows
+
+    def draw_debug_tooltip(self):
+        """Arahkan mouse ke sebuah petak (mode debug) untuk melihat urutan expand, g, h, f, induk."""
+        res = self.last_result
+        if not self.debug_mode or not res or not pygame.mouse.get_focused():
+            return
+        mx, my = pygame.mouse.get_pos()
+        c, r = mx // CELL, my // CELL
+        if not in_bounds(r, c):
+            return
+        WHITE, GREEN, RED, BLUE, ORANGE, GRAY = (
+            (255, 255, 255), (150, 210, 150), (255, 140, 120), (120, 200, 240), (255, 190, 90), (170, 180, 170))
+        t = self.grid[r][c]
+        lines = [(f"Petak baris {r}, kolom {c}", WHITE)]
+        if t in (TREE, PROP):
+            lines.append(("Penghalang (tidak bisa dilewati)", RED))
+        else:
+            lines.append((f"Semak (biaya x{BUSH_COST})" if t == BUSH else "Rumput (biaya x1)", GREEN))
+            node = res["info"].get((r, c))
+            if node is None:
+                lines.append(("Belum dijelajahi", GRAY))
+            else:
+                order, g, h, parent = node
+                lines.append((f"Di-expand ke-{order}" if order else "Frontier (belum di-expand)",
+                            BLUE if order else ORANGE))
+                lines.append((f"g = {g:.2f}   biaya NPC ke petak ini", WHITE))
+                lines.append((f"h = {h:.2f}   " + ("UCS: tanpa heuristik" if self.algo == "ucs"
+                                                else "perkiraan ke target"), WHITE))
+                lines.append((f"f = {g + h:.2f}   (g + h)", WHITE))
+                lines.append((f"Induk: baris {parent[0]}, kolom {parent[1]}" if parent
+                            else "Induk: - (petak awal)", GRAY))
+        w = max(self.font_small.size(s)[0] for s, _ in lines) + 16
+        h_box = len(lines) * 17 + 10
+        bx, by = min(mx + 16, MAP_W - w - 4), min(my + 16, MAP_H - h_box - 4)
+        box = pygame.Surface((w, h_box), pygame.SRCALPHA)
+        box.fill((14, 22, 18, 235))
+        pygame.draw.rect(box, (120, 190, 235), box.get_rect(), 1)
+        for i, (s, col) in enumerate(lines):
+            box.blit(self.font_small.render(s, True, col), (8, 5 + i * 17))
+        self.screen.blit(box, (bx, by))
     def draw_path_overlay(self):
         """Jalur NPC selalu ditampilkan tipis (di luar mode debug) agar mudah dibaca."""
         if self.debug_mode:
@@ -725,60 +951,192 @@ class Game:
     def _npc_flip(self):
         return getattr(self, "_npc_flip_state", False)
 
+        # ---------------- Dashboard (panel kanan) ----------------
+    def _blit_right(self, font, text, color, right, y):
+        s = font.render(text, True, color)
+        self.screen.blit(s, (right - s.get_width(), y))
+
+    def _card_title(self, x, y, text):
+        self.screen.blit(self.font_bold.render(text, True, (140, 205, 150)), (x, y))
+        pygame.draw.line(self.screen, (52, 74, 56), (x, y + 19), (x + PANEL_W - 24, y + 19), 1)
+        return y + 25
+
+    def _card_row(self, x, y, label, value, color=(235, 244, 230)):
+        self.screen.blit(self.font_small.render(label, True, (150, 168, 145)), (x, y))
+        self._blit_right(self.font_small, value, color, x + PANEL_W - 24, y)
+        return y + 18
+
     def draw_hud(self):
-        y0 = ROWS * CELL
-        pygame.draw.rect(self.screen, (22, 34, 26), (0, y0, SCREEN_W, SCREEN_H - y0))
-        pygame.draw.line(self.screen, (44, 61, 47), (0, y0), (SCREEN_W, y0), 2)
-
+        """Dashboard di kanan peta, disusun dari atas ke bawah dalam kartu-kartu
+        berjudul: pengaturan, hasil, perbandingan algoritma, legenda debug, kontrol."""
+        TXT, DIM = (235, 244, 230), (150, 168, 145)
+        GOOD, BAD, ACC = (130, 230, 150), (255, 140, 110), (255, 220, 110)
+        pygame.draw.rect(self.screen, (22, 34, 26), (MAP_W, 0, PANEL_W, SCREEN_H))
+        pygame.draw.line(self.screen, (44, 61, 47), (MAP_W, 0), (MAP_W, SCREEN_H), 2)
+        x, y, W = MAP_W + 12, 10, PANEL_W - 24
         res = self.last_result
-        algo_label = "UCS" if self.algo == "ucs" else f"A* ({self.heuristic})"
-        debug_label = "AKTIF" if self.debug_mode else "mati"
-        mode_label = "GILIRAN" if self.turn_based else f"real-time ({self.chase_mode})"
-        lines_left = [
-            f"Algoritma: {algo_label}   |   Diagonal: {'ya' if self.diagonal else 'tidak'}   |   "
-            f"Mode: {mode_label}   |   Debug: {debug_label}   |   Layar: "
-            + ("penuh" if self.fullscreen else "jendela"),
-            f"Node dieksplorasi: {res['nodes'] if res else '-'}   "
-            f"Panjang jalur: {len(res['path']) if res and res['path'] else '-'}   "
-            + (f"Biaya: {res['cost']:.2f}" if res and res["path"] else "Biaya: -"),
-            f"Waktu komputasi: {res['time_ms']:.2f} ms" if res else "",
-        ]
-        for i, txt in enumerate(lines_left):
-            surf = self.font_small.render(txt, True, (230, 240, 225))
-            self.screen.blit(surf, (10, y0 + 6 + i * 18))
 
-        help_txt = "1/2 algo  H heuristik  G diagonal  E debug  M mode  T giliran  F fullscreen  N peta  R reset  ESC keluar"
-        surf = self.font_tiny.render(help_txt, True, (150, 168, 145))
-        self.screen.blit(surf, (10, y0 + 64))
+        self.screen.blit(self.font_title.render("KEJAR-KEJARAN DI DESA", True, TXT), (x, y))
+        y += 32
 
-        if self.debug_mode:
-            legend1 = "Debug: biru = node yang sudah di-expand (angka = urutan, makin terang makin baru)"
-            legend2 = "kuning = jalur akhir NPC   merah = posisi NPC   hijau = posisi target (player)"
-            surf2 = self.font_tiny.render(legend1, True, (120, 190, 235))
-            surf3 = self.font_tiny.render(legend2, True, (120, 190, 235))
-            self.screen.blit(surf2, (10, y0 + 80))
-            self.screen.blit(surf3, (10, y0 + 94))
+        # --- pengaturan ---
+        y = self._card_title(x, y, "PENGATURAN")
+        y = self._card_row(x, y, "Algoritma", "UCS" if self.algo == "ucs" else f"A* ({self.heuristic})", ACC)
+        y = self._card_row(x, y, "Gerak", "8 arah (diagonal)" if self.diagonal else "4 arah")
+        y = self._card_row(x, y, "Mode", "Giliran" if self.turn_based else f"Real-time ({self.chase_mode})")
+        y = self._card_row(x, y, "Debug", "AKTIF" if self.debug_mode else "mati", GOOD if self.debug_mode else DIM)
+        y += 8
+
+        # --- hasil pencarian terakhir ---
+        y = self._card_title(x, y, "HASIL PENCARIAN NPC")
+        if res and res["path"]:
+            in_bush = sum(1 for r, c in res["path"] if self.grid[r][c] == BUSH)
+            y = self._card_row(x, y, "Node dieksplorasi", str(res["nodes"]))
+            y = self._card_row(x, y, "Frontier (open list)", str(len(res["frontier"])))
+            y = self._card_row(x, y, "Panjang jalur", f"{len(res['path'])} petak")
+            y = self._card_row(x, y, "Biaya jalur", f"{res['cost']:.2f}", ACC)
+            y = self._card_row(x, y, "Melewati semak", f"{in_bush} petak", BAD if in_bush else GOOD)
+            y = self._card_row(x, y, "Waktu komputasi", f"{res['time_ms']:.2f} ms")
+        else:
+            y = self._card_row(x, y, "Jalur", "tidak ditemukan", BAD)
+            y += 18 * 5
+        y += 8
+
+        # --- perbandingan semua algoritma pada soal yang sama ---
+        y = self._card_title(x, y, "PERBANDINGAN ALGORITMA")
+        COL = {"node": 152, "cost": 214, "path": 262, "ms": W}  # tepi kanan tiap kolom
+        self.screen.blit(self.font_tiny.render("Algoritma", True, DIM), (x, y))
+        for key, label in (("node", "Node"), ("cost", "Biaya"), ("path", "Jalur"), ("ms", "ms")):
+            self._blit_right(self.font_tiny, label, DIM, x + COL[key], y)
+        y += 16
+        rows = self.get_compare_rows()
+        best_cost = min(r["cost"] for _, r in rows)
+        best_nodes = min(r["nodes"] for _, r in rows)
+        active = "ucs" if self.algo == "ucs" else self.heuristic
+        for name, r in rows:
+            if name == active:
+                pygame.draw.rect(self.screen, (44, 66, 50), (x - 6, y - 1, W + 12, 18), border_radius=3)
+            ok = bool(r["path"])
+            label = "UCS" if name == "ucs" else f"A* {name}"
+            self.screen.blit(self.font_small.render(label, True, ACC if name == active else TXT), (x, y))
+            self._blit_right(self.font_small, str(r["nodes"]), GOOD if r["nodes"] == best_nodes else TXT, x + COL["node"], y)
+            self._blit_right(self.font_small, f"{r['cost']:.2f}" if ok else "-",
+                            BAD if ok and r["cost"] > best_cost + 1e-6 else TXT, x + COL["cost"], y)
+            self._blit_right(self.font_small, str(len(r["path"])) if ok else "-", TXT, x + COL["path"], y)
+            self._blit_right(self.font_small, f"{r['time_ms']:.2f}", DIM, x + COL["ms"], y)
+            y += 18
+        self.screen.blit(self.font_tiny.render("hijau: node tersedikit   merah: bukan optimal", True, DIM), (x, y))
+        y += 22
+
+        # --- legenda debug ---
+        y = self._card_title(x, y, "LEGENDA DEBUG" + ("" if self.debug_mode else "  (tekan E)"))
+        tc = TXT if self.debug_mode else DIM
+        for i in range(34):  # gradasi node di-expand
+            pygame.draw.line(self.screen, self._lerp(EXPAND_START, EXPAND_END, i / 33), (x + i, y + 2), (x + i, y + 14))
+        self.screen.blit(self.font_small.render("Di-expand (angka = urutan)", True, tc), (x + 44, y))
+        y += 18
+        pygame.draw.rect(self.screen, (255, 165, 50), (x, y + 2, 34, 13))
+        pygame.draw.rect(self.screen, (255, 200, 90), (x, y + 2, 34, 13), 2)
+        self.screen.blit(self.font_small.render("Frontier (belum di-expand)", True, tc), (x + 44, y))
+        y += 18
+        pygame.draw.line(self.screen, (255, 226, 80), (x, y + 8), (x + 34, y + 8), 5)
+        pygame.draw.circle(self.screen, (255, 110, 40), (x + 17, y + 8), 6)
+        self.screen.blit(self.font_small.render("Jalur akhir (oranye = semak)", True, tc), (x + 44, y))
+        y += 18
+        for i, (col, ch) in enumerate((((255, 90, 60), "S"), ((80, 220, 120), "G"))):
+            pygame.draw.rect(self.screen, col, (x + i * 20, y + 1, 14, 14))
+            t = self.font_tiny.render(ch, True, (10, 10, 10))
+            self.screen.blit(t, t.get_rect(center=(x + i * 20 + 7, y + 8)))
+        self.screen.blit(self.font_small.render("NPC awal (S), target (G)", True, tc), (x + 44, y))
+        y += 18
+        self.screen.blit(self.font_small.render(f"Angka: {LABEL_NAMES[LABEL_MODES[self.label_mode]]}", True, tc), (x, y))
+        y += 26
+
+        # --- kontrol ---
+        y = self._card_title(x, y, "KONTROL")
+        hints = [("WASD", "gerak"), ("Klik", "pindah"), ("1", "A*"), ("2", "UCS"), ("H", "heuristik"),
+                ("G", "diagonal"), ("E", "debug"), ("L", "label angka"), ("M", "mode NPC"), ("T", "giliran"),
+                ("SPACE", "langkah NPC"), ("N", "peta baru"), ("R", "reset"), ("F", "layar penuh"), ("ESC", "keluar")]
+        for i, (k, d) in enumerate(hints):
+            hx, hy = x + (i % 2) * (W // 2), y + (i // 2) * 16
+            self.screen.blit(self.font_bold.render(k, True, ACC), (hx, hy))
+            self.screen.blit(self.font_small.render(d, True, DIM), (hx + 54, hy))
 
         if self.toast_text and time.perf_counter() < self.toast_until:
             msg = self.font.render(self.toast_text, True, (255, 255, 255))
             box = pygame.Surface((msg.get_width() + 24, msg.get_height() + 14), pygame.SRCALPHA)
             box.fill((224, 83, 61, 235))
             box.blit(msg, (12, 7))
-            self.screen.blit(box, (SCREEN_W // 2 - box.get_width() // 2, 12))
+            self.screen.blit(box, (MAP_W // 2 - box.get_width() // 2, 12))
+
+    def draw_combat_overlay(self):
+        """Modal pertarungan giliran: HP bar kedua pihak, log aksi terakhir, dan
+        kartu debug NPC (aksi dipertimbangkan + skor + node count, lihat pertarungan.py)."""
+        if not self.in_combat:
+            return
+        W, H = 560, 460
+        x0, y0 = (MAP_W - W) // 2, (MAP_H - H) // 2
+        box = pygame.Surface((W, H), pygame.SRCALPHA)
+        box.fill((10, 16, 12, 235))
+        pygame.draw.rect(box, (255, 210, 90), box.get_rect(), 2)
+        pad = 18
+        box.blit(self.font_title.render("PERTARUNGAN!", True, (255, 220, 110)), (pad, pad))
+        y = pad + 34
+
+        def hp_bar(surf, x, y, w, h, hp, max_hp, color):
+            pygame.draw.rect(surf, (40, 20, 20), (x, y, w, h))
+            fill_w = int(w * max(0, hp) / max_hp)
+            pygame.draw.rect(surf, color, (x, y, fill_w, h))
+            pygame.draw.rect(surf, (230, 230, 220), (x, y, w, h), 1)
+
+        box.blit(self.font_small.render(f"Pemain  HP {self.combat.player_hp}/100", True, (235, 244, 230)), (pad, y))
+        hp_bar(box, pad, y + 18, W - 2 * pad, 14, self.combat.player_hp, combat.PLAYER_MAX_HP, (90, 200, 120))
+        y += 42
+        box.blit(self.font_small.render(f"NPC     HP {self.combat.npc_hp}/100", True, (235, 244, 230)), (pad, y))
+        hp_bar(box, pad, y + 18, W - 2 * pad, 14, self.combat.npc_hp, combat.NPC_MAX_HP, (220, 100, 90))
+        y += 48
+
+        for line in self.combat_log[-3:]:
+            box.blit(self.font_small.render(line, True, (200, 210, 195)), (pad, y))
+            y += 18
+        y += 6
+
+        if self.combat_debug:
+            y = combat.render_combat_debug_card(box, self.font_bold, self.font_tiny, pad, y, W - 2 * pad, self.combat_debug)
+
+        if self.combat_pending_action:
+            prompt = f"Giliran NPC... ({self.combat_turn_timer:.1f}s)"
+            color = (170, 190, 170)
+        else:
+            prompt = "1 Serang   2 Bertahan   3 Pulihkan   4 Tangkis"
+            color = (255, 220, 110)
+        box.blit(self.font_small.render(prompt, True, color), (pad, H - 28))
+        self.screen.blit(box, (x0, y0))
 
     def draw(self):
         self.screen.fill((20, 30, 20))
         for r in range(ROWS):
             for c in range(COLS):
                 self.draw_tile(r, c)
-        self.draw_debug_overlay()
         self.draw_path_overlay()
         self.draw_decor_and_entities()
+        self.draw_debug_overlay()
+        self.draw_debug_tooltip()
         self.draw_hud()
+        self.draw_combat_overlay()
         pygame.display.flip()
 
     # ---------------- Input / loop ----------------
     def handle_key(self, key):
+        if self.in_combat:  # 1-4 pilih aksi, tombol lain (gerak dsb) diabaikan saat bertarung
+            combat_keys = {pygame.K_1: combat.Action.ATTACK, pygame.K_2: combat.Action.DEFEND,
+                            pygame.K_3: combat.Action.HEAL, pygame.K_4: combat.Action.PARRY}
+            if key in combat_keys:
+                self.combat_player_action(combat_keys[key])
+            elif key == pygame.K_ESCAPE:
+                pygame.quit()
+                sys.exit(0)
+            return
         move_map = {
             pygame.K_UP: (-1, 0), pygame.K_w: (-1, 0),
             pygame.K_DOWN: (1, 0), pygame.K_s: (1, 0),
@@ -806,6 +1164,8 @@ class Game:
             self.recompute_npc_path()
         elif key == pygame.K_e:
             self.debug_mode = not self.debug_mode
+        elif key == pygame.K_l:
+            self.label_mode = (self.label_mode + 1) % len(LABEL_MODES)
         elif key == pygame.K_m:
             self.chase_mode = "manual" if self.chase_mode == "auto" else "auto"
             self.npc_timer = 0.0
@@ -848,6 +1208,8 @@ class Game:
         self.fullscreen = False
 
     def handle_click(self, pos):
+        if self.in_combat:
+            return
         x, y = pos
         if y >= ROWS * CELL:
             return
@@ -865,7 +1227,7 @@ class Game:
     def _poll_continuous_movement(self, dt):
         """Gerak halus saat tombol arah DITAHAN (real-time saja). Kecepatan
         melambat otomatis ketika pemain sedang berada di petak semak."""
-        if self.turn_based:
+        if self.turn_based or self.in_combat:
             return
         self.player_timer += dt * 1000
         if self.player_timer < self.player_step_ms:
@@ -896,8 +1258,9 @@ class Game:
                     self.handle_click(event.pos)
 
             self._poll_continuous_movement(dt)
+            self._poll_combat(dt)
 
-            if not self.turn_based and self.chase_mode == "auto":
+            if not self.turn_based and self.chase_mode == "auto" and not self.in_combat:
                 self.npc_timer += dt * 1000
                 if self.npc_timer >= self.npc_step_delay:
                     self.npc_timer = 0.0

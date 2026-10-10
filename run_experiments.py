@@ -29,7 +29,7 @@ for depth in (2, 3, 4, 5, 6):
     t2 = (time.perf_counter()-t0)*1000
     print(f"depth={depth:2d}  minimax: nodes={c1['nodes']:6d} val={v1:7.1f} t={t1:7.3f}ms  |  "
             f"alphabeta: nodes={c2['nodes']:6d} (pruned {c2['pruned']:4d}) val={v2:7.1f} t={t2:7.3f}ms  "
-            f"-> hemat {100*(1-c2['nodes']/c1['nodes']):5.1f}%  | aksi sama? {a1==a2}")
+            f"-> hemat {100*(1-c2['nodes']/c1['nodes']):5.1f}%  | jalur sama? {a1==a2}")
 
 print()
 print("="*70)
@@ -53,8 +53,8 @@ orders = {
 s = fresh_state()
 for name, order in orders.items():
     c = {"nodes": 0, "pruned": 0}
-    v, a = m.alphabeta(s, 5, -math.inf, math.inf, m.eval_hp_diff, order, c)
-    print(f"{name:42s} -> nodes={c['nodes']:6d} pruned={c['pruned']:4d} val={v:7.1f} aksi_akar={a.value if a else None}")
+    v, pv = m.alphabeta(s, 5, -math.inf, math.inf, m.eval_hp_diff, order, c)
+    print(f"{name:42s} -> nodes={c['nodes']:6d} pruned={c['pruned']:4d} val={v:7.1f} aksi_akar={pv[0].value if pv else None}")
 
 print()
 print("="*70)
@@ -64,9 +64,9 @@ s = fresh_state()
 for depth in range(1, 8):
     c = {"nodes": 0, "pruned": 0}
     t0 = time.perf_counter()
-    v, a = m.alphabeta(s, depth, -math.inf, math.inf, m.eval_hp_diff, m.ACTIONS, c)
+    v, pv = m.alphabeta(s, depth, -math.inf, math.inf, m.eval_hp_diff, m.ACTIONS, c)
     dt = (time.perf_counter()-t0)*1000
-    print(f"depth={depth}  nodes={c['nodes']:7d}  pruned={c['pruned']:6d}  time={dt:8.3f}ms  aksi={a.value if a else '-':8s} val={v:.1f}")
+    print(f"depth={depth}  nodes={c['nodes']:7d}  pruned={c['pruned']:6d}  time={dt:8.3f}ms  aksi={pv[0].value if pv else '-':8s} val={v:.1f}")
 
 print()
 print("="*70)
@@ -89,11 +89,11 @@ def random_policy(state):
 
 s = fresh_state()
 c_mm = {"nodes": 0}
-v_mm, a_mm = m.minimax(s, 4, m.eval_hp_diff, m.ACTIONS, c_mm)
+v_mm, pv_mm = m.minimax(s, 4, m.eval_hp_diff, m.ACTIONS, c_mm)
 c_em = {"nodes": 0}
-v_em, a_em = m.expectimax(s, 4, m.eval_hp_diff, m.ACTIONS, c_em, player_policy=random_policy)
-print(f"minimax   (asumsi pemain optimal) -> aksi={a_mm.value if a_mm else None} val={v_mm:.1f} nodes={c_mm['nodes']}")
-print(f"expectimax(asumsi pemain acak)    -> aksi={a_em.value if a_em else None} val={v_em:.1f} nodes={c_em['nodes']}")
+v_em, pv_em = m.expectimax(s, 4, m.eval_hp_diff, m.ACTIONS, c_em, player_policy=random_policy)
+print(f"minimax   (asumsi pemain optimal) -> aksi={pv_mm[0].value if pv_mm else None} val={v_mm:.1f} nodes={c_mm['nodes']}")
+print(f"expectimax(asumsi pemain acak)    -> aksi={pv_em[0].value if pv_em else None} val={v_em:.1f} nodes={c_em['nodes']}")
 
 def run_many(algorithm, n=60, eval_fn=m.eval_hp_diff, **kw):
     wins = 0

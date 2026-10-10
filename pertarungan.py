@@ -97,31 +97,84 @@ def _hp_level(current_hp, max_hp=100, bucket=HP_LEVEL_BUCKET):
     return missing // bucket
 
 
-def attack_hit_chance(attacker_hp):
-    return _fib_ramp(_hp_level(attacker_hp), ATTACK_HIT_BASE, ATTACK_HIT_CAP)
+# ---------------------------------------------------------------------------
+# 1b. STAT PER-KARAKTER (buat fitur banyak musuh / local search & CSP) —
+#    kalau PLAYER_STATS_OVERRIDE / NPC_STATS_OVERRIDE None (default), semua
+#    fungsi di bawah berperilaku SAMA PERSIS seperti sebelumnya (pakai
+#    konstanta global di atas) — jadi pertarungan 1-lawan-1 yang sudah ada
+#    tidak berubah sama sekali. Override dipakai game.py HANYA saat memulai
+#    duel melawan salah satu dari banyak musuh (tiap musuh "karakter" beda).
+# ---------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Stats:
+    """Profil tempur satu pihak (pemain ATAU satu musuh). Cuma stat yang
+    diminta untuk naik lewat reward: max_hp, rentang damage, peluang kena."""
+    name: str
+    max_hp: int
+    atk_min: int
+    atk_max: int
+    hit_base: float
+    hit_cap: float
 
 
-def heal_chance(healer_hp):
-    return _fib_ramp(_hp_level(healer_hp), HEAL_CHANCE_BASE, HEAL_CHANCE_CAP)
+PLAYER_STATS_OVERRIDE = None   # Stats | None — di-set game.py sebelum start_combat()
+NPC_STATS_OVERRIDE = None      # Stats | None — profil musuh yang sedang dilawan
+
+
+def _stats_for(side):
+    return PLAYER_STATS_OVERRIDE if side == "player" else NPC_STATS_OVERRIDE
+
+
+def _max_hp(side):
+    st = _stats_for(side)
+    return st.max_hp if st else (PLAYER_MAX_HP if side == "player" else NPC_MAX_HP)
+
+
+def _atk_range(side):
+    st = _stats_for(side)
+    return (st.atk_min, st.atk_max) if st else (ATTACK_DMG_MIN, ATTACK_DMG_MAX)
+
+
+def _hit_range(side):
+    st = _stats_for(side)
+    return (st.hit_base, st.hit_cap) if st else (ATTACK_HIT_BASE, ATTACK_HIT_CAP)
+
+
+def _dmg_values(side):
+    lo, hi = _atk_range(side)
+    return [round(lo + i * (hi - lo) / 5) for i in range(6)]
+
+
+def attack_hit_chance(attacker_hp, side="npc"):
+    base, cap = _hit_range(side)
+    return _fib_ramp(_hp_level(attacker_hp, _max_hp(side)), base, cap)
+
+
+def heal_chance(healer_hp, side="npc"):
+    return _fib_ramp(_hp_level(healer_hp, _max_hp(side)), HEAL_CHANCE_BASE, HEAL_CHANCE_CAP)
 
 
 def defend_penetration(streak):
     return _fib_ramp(streak, DEFEND_BASE_PENETRATION, DEFEND_CAP_PENETRATION)
 
 
-_ATTACK_DMG_VALUES = [round(ATTACK_DMG_MIN + i * (ATTACK_DMG_MAX - ATTACK_DMG_MIN) / 5) for i in range(6)]
 _HEAL_MULT_VALUES = [round(HEAL_MULT_MIN + i * (HEAL_MULT_MAX - HEAL_MULT_MIN) / 5, 2) for i in range(6)]
 
 
-def roll_attack_damage():
-    return random.choices(_ATTACK_DMG_VALUES, weights=ATTACK_DMG_WEIGHTS, k=1)[0]
+def roll_attack_damage(side="npc"):
+    return random.choices(_dmg_values(side), weights=ATTACK_DMG_WEIGHTS, k=1)[0]
 
 
 def roll_heal_multiplier():
     return random.choices(_HEAL_MULT_VALUES, weights=HEAL_MULT_WEIGHTS, k=1)[0]
 
 
-EXPECTED_ATTACK_DMG = sum(v * w for v, w in zip(_ATTACK_DMG_VALUES, ATTACK_DMG_WEIGHTS)) / sum(ATTACK_DMG_WEIGHTS)
+def expected_attack_damage(side="npc"):
+    values = _dmg_values(side)
+    return sum(v * w for v, w in zip(values, ATTACK_DMG_WEIGHTS)) / sum(ATTACK_DMG_WEIGHTS)
+
+
 EXPECTED_HEAL_MULT = sum(v * w for v, w in zip(_HEAL_MULT_VALUES, HEAL_MULT_WEIGHTS)) / sum(HEAL_MULT_WEIGHTS)
 EXPECTED_PARRY_MULT = (PARRY_REFLECT_MIN + PARRY_REFLECT_MAX) / 2
 
@@ -189,7 +242,14 @@ class CombatState:
         return None
 
 
-def new_combat(player_hp=PLAYER_MAX_HP, npc_hp=NPC_MAX_HP, npc_starts=True):
+def new_combat(player_hp=None, npc_hp=None, npc_starts=True):
+    """player_hp/npc_hp default ke _max_hp('player'/'npc') DIAMBIL SAAT DIPANGGIL
+    (bukan saat modul di-load) — supaya kalau PLAYER_STATS_OVERRIDE/NPC_STATS_OVERRIDE
+    sedang aktif (lihat §1b), pertarungan baru mulai dengan HP penuh sesuai stat itu."""
+    if player_hp is None:
+        player_hp = _max_hp("player")
+    if npc_hp is None:
+        npc_hp = _max_hp("npc")
     return CombatState(player_hp, npc_hp, turn=0, to_move=npc_starts)
 
 
@@ -212,10 +272,10 @@ def apply_action(state: CombatState, action: Action):
     if state.to_move:  # ---- giliran NPC ----
         event["actor"] = "npc"
         if action == Action.ATTACK:
-            hit = random.random() < attack_hit_chance(npc_hp)
+            hit = random.random() < attack_hit_chance(npc_hp, "npc")
             event["hit"] = hit
             if hit:
-                dmg = roll_attack_damage()
+                dmg = roll_attack_damage("npc")
                 if player_last == Action.PARRY:
                     reflect = round(dmg * random.uniform(PARRY_REFLECT_MIN, PARRY_REFLECT_MAX))
                     npc_hp -= reflect
@@ -228,23 +288,23 @@ def apply_action(state: CombatState, action: Action):
                     p_last_dmg = dmg
                     event["damage"] = dmg
         elif action == Action.HEAL:
-            if random.random() < heal_chance(npc_hp):
+            if random.random() < heal_chance(npc_hp, "npc"):
                 if random.random() < HEAL_BONUS_CHANCE:
                     healed = round((HEAL_BASE + (n_last_dmg or 5)) * roll_heal_multiplier())
                     event["bonus_heal"] = True
                 else:
                     healed = HEAL_BASE
-                npc_hp = min(NPC_MAX_HP, npc_hp + healed)
+                npc_hp = min(_max_hp("npc"), npc_hp + healed)
                 event["heal"] = healed
         n_streak = n_streak + 1 if action == Action.DEFEND else 0
         npc_last = action
     else:  # ---- giliran pemain ----
         event["actor"] = "player"
         if action == Action.ATTACK:
-            hit = random.random() < attack_hit_chance(player_hp)
+            hit = random.random() < attack_hit_chance(player_hp, "player")
             event["hit"] = hit
             if hit:
-                dmg = roll_attack_damage()
+                dmg = roll_attack_damage("player")
                 if npc_last == Action.PARRY:
                     reflect = round(dmg * random.uniform(PARRY_REFLECT_MIN, PARRY_REFLECT_MAX))
                     player_hp -= reflect
@@ -257,13 +317,13 @@ def apply_action(state: CombatState, action: Action):
                     n_last_dmg = dmg
                     event["damage"] = dmg
         elif action == Action.HEAL:
-            if random.random() < heal_chance(player_hp):
+            if random.random() < heal_chance(player_hp, "player"):
                 if random.random() < HEAL_BONUS_CHANCE:
                     healed = round((HEAL_BASE + (p_last_dmg or 5)) * roll_heal_multiplier())
                     event["bonus_heal"] = True
                 else:
                     healed = HEAL_BASE
-                player_hp = min(PLAYER_MAX_HP, player_hp + healed)
+                player_hp = min(_max_hp("player"), player_hp + healed)
                 event["heal"] = healed
         p_streak = p_streak + 1 if action == Action.DEFEND else 0
         player_last = action
@@ -283,38 +343,38 @@ def apply_action_expected(state: CombatState, action: Action) -> CombatState:
     player_last, npc_last = state.player_last, state.npc_last
     p_streak, n_streak = state.player_defend_streak, state.npc_defend_streak
 
-    def expected_heal(hp):
-        p_heal = heal_chance(hp)
+    def expected_heal(hp, side):
+        p_heal = heal_chance(hp, side)
         e_amount = ((1 - HEAL_BONUS_CHANCE) * HEAL_BASE
                     + HEAL_BONUS_CHANCE * (HEAL_BASE + 5) * EXPECTED_HEAL_MULT)
         return p_heal * e_amount
 
     if state.to_move:
         if action == Action.ATTACK:
-            p_hit = attack_hit_chance(npc_hp)
+            p_hit = attack_hit_chance(npc_hp, "npc")
             if player_last == Action.PARRY:
-                npc_hp -= p_hit * EXPECTED_ATTACK_DMG * EXPECTED_PARRY_MULT
+                npc_hp -= p_hit * expected_attack_damage("npc") * EXPECTED_PARRY_MULT
             else:
-                dmg = p_hit * EXPECTED_ATTACK_DMG
+                dmg = p_hit * expected_attack_damage("npc")
                 if player_last == Action.DEFEND:
                     dmg *= defend_penetration(p_streak)
                 player_hp -= dmg
         elif action == Action.HEAL:
-            npc_hp = min(NPC_MAX_HP, npc_hp + expected_heal(npc_hp))
+            npc_hp = min(_max_hp("npc"), npc_hp + expected_heal(npc_hp, "npc"))
         n_streak = n_streak + 1 if action == Action.DEFEND else 0
         npc_last = action
     else:
         if action == Action.ATTACK:
-            p_hit = attack_hit_chance(player_hp)
+            p_hit = attack_hit_chance(player_hp, "player")
             if npc_last == Action.PARRY:
-                player_hp -= p_hit * EXPECTED_ATTACK_DMG * EXPECTED_PARRY_MULT
+                player_hp -= p_hit * expected_attack_damage("player") * EXPECTED_PARRY_MULT
             else:
-                dmg = p_hit * EXPECTED_ATTACK_DMG
+                dmg = p_hit * expected_attack_damage("player")
                 if npc_last == Action.DEFEND:
                     dmg *= defend_penetration(n_streak)
                 npc_hp -= dmg
         elif action == Action.HEAL:
-            player_hp = min(PLAYER_MAX_HP, player_hp + expected_heal(player_hp))
+            player_hp = min(_max_hp("player"), player_hp + expected_heal(player_hp, "player"))
         p_streak = p_streak + 1 if action == Action.DEFEND else 0
         player_last = action
 
@@ -384,57 +444,62 @@ EVAL_FUNCTIONS = {
 # ---------------------------------------------------------------------------
 
 def minimax(state, depth, eval_fn, action_order, counters):
+    """Return (nilai, principal_variation). `principal_variation` adalah daftar
+    Action berurutan — jalur TERBAIK yang diprediksi (giliran NPC & pemain
+    berselang-seling) sampai depth habis / state terminal. Ini dipakai overlay
+    debug untuk menampilkan "pohon keputusan" sebagai satu jalur yang jelas,
+    bukan cuma angka skor akhir."""
     counters["nodes"] += 1
     if state.is_terminal():
-        return utility(state), None
+        return utility(state), []
     if depth == 0:
-        return eval_fn(state), None
-    best_action = None
+        return eval_fn(state), []
+    best_pv = []
     if state.to_move:  # NPC = MAX
         best_val = -math.inf
         for a in action_order:
-            val, _ = minimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters)
+            val, pv = minimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters)
             if val > best_val:
-                best_val, best_action = val, a
-        return best_val, best_action
+                best_val, best_pv = val, [a] + pv
+        return best_val, best_pv
     else:  # pemain diasumsikan optimal = MIN (skenario terburuk buat NPC)
         best_val = math.inf
         for a in action_order:
-            val, _ = minimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters)
+            val, pv = minimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters)
             if val < best_val:
-                best_val, best_action = val, a
-        return best_val, best_action
+                best_val, best_pv = val, [a] + pv
+        return best_val, best_pv
 
 
 def alphabeta(state, depth, alpha, beta, eval_fn, action_order, counters):
     counters["nodes"] += 1
     if state.is_terminal():
-        return utility(state), None
+        return utility(state), []
     if depth == 0:
-        return eval_fn(state), None
-    best_action = None
+        return eval_fn(state), []
+    best_pv = []
     if state.to_move:
         best_val = -math.inf
         for a in action_order:
-            val, _ = alphabeta(apply_action_expected(state, a), depth - 1, alpha, beta, eval_fn, action_order, counters)
+            val, pv = alphabeta(apply_action_expected(state, a), depth - 1, alpha, beta, eval_fn, action_order, counters)
             if val > best_val:
-                best_val, best_action = val, a
+                best_val, best_pv = val, [a] + pv
             alpha = max(alpha, best_val)
             if alpha >= beta:
                 counters["pruned"] = counters.get("pruned", 0) + 1
                 break
-        return best_val, best_action
+        return best_val, best_pv
     else:
         best_val = math.inf
         for a in action_order:
-            val, _ = alphabeta(apply_action_expected(state, a), depth - 1, alpha, beta, eval_fn, action_order, counters)
+            val, pv = alphabeta(apply_action_expected(state, a), depth - 1, alpha, beta, eval_fn, action_order, counters)
             if val < best_val:
-                best_val, best_action = val, a
+                best_val, best_pv = val, [a] + pv
             beta = min(beta, best_val)
             if alpha >= beta:
                 counters["pruned"] = counters.get("pruned", 0) + 1
                 break
-        return best_val, best_action
+        return best_val, best_pv
 
 
 def alphabeta_early_stop(state, depth, alpha, beta, eval_fn, action_order, counters, budget):
@@ -443,66 +508,72 @@ def alphabeta_early_stop(state, depth, alpha, beta, eval_fn, action_order, count
     lewat eval_fn. Dipakai untuk eksperimen 'early stop' vs alpha-beta penuh."""
     counters["nodes"] += 1
     if state.is_terminal():
-        return utility(state), None
+        return utility(state), []
     if depth == 0 or counters["nodes"] >= budget:
-        return eval_fn(state), None
-    best_action = None
+        return eval_fn(state), []
+    best_pv = []
     if state.to_move:
         best_val = -math.inf
         for a in action_order:
             if counters["nodes"] >= budget:
                 break
-            val, _ = alphabeta_early_stop(apply_action_expected(state, a), depth - 1, alpha, beta,
+            val, pv = alphabeta_early_stop(apply_action_expected(state, a), depth - 1, alpha, beta,
                                             eval_fn, action_order, counters, budget)
             if val > best_val:
-                best_val, best_action = val, a
+                best_val, best_pv = val, [a] + pv
             alpha = max(alpha, best_val)
             if alpha >= beta:
                 counters["pruned"] = counters.get("pruned", 0) + 1
                 break
-        return best_val, best_action
+        return best_val, best_pv
     else:
         best_val = math.inf
         for a in action_order:
             if counters["nodes"] >= budget:
                 break
-            val, _ = alphabeta_early_stop(apply_action_expected(state, a), depth - 1, alpha, beta,
+            val, pv = alphabeta_early_stop(apply_action_expected(state, a), depth - 1, alpha, beta,
                                             eval_fn, action_order, counters, budget)
             if val < best_val:
-                best_val, best_action = val, a
+                best_val, best_pv = val, [a] + pv
             beta = min(beta, best_val)
             if alpha >= beta:
                 counters["pruned"] = counters.get("pruned", 0) + 1
                 break
-        return best_val, best_action
+        return best_val, best_pv
 
 
 def expectimax(state, depth, eval_fn, action_order, counters, player_policy=None):
     """Variasi opsional: giliran pemain diperlakukan sebagai CHANCE node
     (pemain tidak diasumsikan optimal, tapi mengikuti distribusi probabilitas
-    `player_policy(state) -> {Action: prob}`). Default: uniform random."""
+    `player_policy(state) -> {Action: prob}`). Default: uniform random.
+    PV di node CHANCE = jalur dari aksi pemain yang PALING MUNGKIN (probabilitas
+    tertinggi) — cuma buat ditampilkan, bukan bagian dari perhitungan nilai."""
     counters["nodes"] += 1
     if state.is_terminal():
-        return utility(state), None
+        return utility(state), []
     if depth == 0:
-        return eval_fn(state), None
+        return eval_fn(state), []
     if state.to_move:  # NPC tetap MAX
-        best_val, best_action = -math.inf, None
+        best_val, best_pv = -math.inf, []
         for a in action_order:
-            val, _ = expectimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters, player_policy)
+            val, pv = expectimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters, player_policy)
             if val > best_val:
-                best_val, best_action = val, a
-        return best_val, best_action
+                best_val, best_pv = val, [a] + pv
+        return best_val, best_pv
     else:  # CHANCE
         probs = player_policy(state) if player_policy else {a: 1.0 / len(action_order) for a in action_order}
         exp_val = 0.0
+        likely_a, likely_p, likely_pv = None, -1.0, []
         for a in action_order:
             p = probs.get(a, 0.0)
             if p == 0.0:
                 continue
-            val, _ = expectimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters, player_policy)
+            val, pv = expectimax(apply_action_expected(state, a), depth - 1, eval_fn, action_order, counters, player_policy)
             exp_val += p * val
-        return exp_val, None
+            if p > likely_p:
+                likely_p, likely_a, likely_pv = p, a, pv
+        pv = ([likely_a] + likely_pv) if likely_a else []
+        return exp_val, pv
 
 
 ALGORITHMS = {
@@ -521,8 +592,12 @@ ALGORITHMS = {
 def choose_npc_action(state, algorithm="alphabeta", depth=4, eval_fn=eval_hp_diff,
                     action_order=None, node_budget=60, player_policy=None):
     """Return (aksi_terpilih: Action, debug: dict).
-    debug['considered'] = [(Action, skor_atau_None), ...]  — buat overlay #1
-    debug['nodes']      = total node yang dieksplorasi     — buat overlay #2
+    debug['considered'] = [(Action, skor_atau_None, pv_setelah_aksi_ini), ...]  — overlay #1
+    debug['nodes']      = total node yang dieksplorasi                          — overlay #2
+    debug['pv']         = [aksi_akar] + pv_cabang_terpilih — JALUR LENGKAP yang
+                           diprediksi NPC (giliran NPC/Pemain berselang-seling),
+                           dipakai overlay "pohon keputusan" supaya kelihatan
+                           bukan cuma skor akhir tapi URUTAN langkah yang dipikirkan.
     """
     order = list(action_order) if action_order else list(ACTIONS)
     counters = {"nodes": 0, "pruned": 0}
@@ -531,29 +606,34 @@ def choose_npc_action(state, algorithm="alphabeta", depth=4, eval_fn=eval_hp_dif
 
     for a in order:
         child = apply_action_expected(state, a)
+        pv_rest = []
         if algorithm == "minimax":
-            val, _ = minimax(child, depth - 1, eval_fn, order, counters)
+            val, pv_rest = minimax(child, depth - 1, eval_fn, order, counters)
         elif algorithm == "alphabeta":
-            val, _ = alphabeta(child, depth - 1, -math.inf, math.inf, eval_fn, order, counters)
+            val, pv_rest = alphabeta(child, depth - 1, -math.inf, math.inf, eval_fn, order, counters)
         elif algorithm == "early_stop":
             if counters["nodes"] >= node_budget:
-                considered.append((a, None))
+                considered.append((a, None, []))
                 continue
-            val, _ = alphabeta_early_stop(child, depth - 1, -math.inf, math.inf, eval_fn,
+            val, pv_rest = alphabeta_early_stop(child, depth - 1, -math.inf, math.inf, eval_fn,
                                         order, counters, node_budget)
         elif algorithm == "expectimax":
-            val, _ = expectimax(child, depth - 1, eval_fn, order, counters, player_policy)
+            val, pv_rest = expectimax(child, depth - 1, eval_fn, order, counters, player_policy)
         else:
             raise ValueError(f"algoritma tidak dikenal: {algorithm}")
-        considered.append((a, val))
+        considered.append((a, val, pv_rest))
 
-    scored = [(a, v) for a, v in considered if v is not None]
-    best_action = max(scored, key=lambda x: x[1])[0] if scored else random.choice(order)
+    scored = [(a, v, pv) for a, v, pv in considered if v is not None]
+    if scored:
+        best_action, _, best_pv_rest = max(scored, key=lambda x: x[1])
+    else:
+        best_action, best_pv_rest = random.choice(order), []
 
     debug = {
         "algorithm": algorithm, "depth": depth,
         "eval_fn": getattr(eval_fn, "__name__", str(eval_fn)),
-        "considered": considered,
+        "considered": [(a, v) for a, v, _ in considered],   # tetap 2-tuple: kompatibel dgn kode lama
+        "pv": [best_action] + best_pv_rest,
         "nodes": counters["nodes"],
         "pruned": counters.get("pruned", 0),
         "time_ms": (time.perf_counter() - t0) * 1000,
@@ -602,7 +682,9 @@ def render_combat_debug_card(screen, pygame_font_bold, pygame_font_small, x, y, 
         f"(depth={debug['depth']}, eval={debug['eval_fn']})", True, DIM), (x, y))
     y += 18
 
-    # (1) aksi yang dipertimbangkan & skornya, aksi terpilih disorot
+    # (1) aksi yang dipertimbangkan di giliran INI & skornya, aksi terpilih disorot
+    screen.blit(pygame_font_small.render("Opsi giliran ini:", True, DIM), (x, y))
+    y += 16
     scored = [(a, v) for a, v in debug["considered"] if v is not None]
     best_v = max(v for _, v in scored) if scored else None
     for a, v in debug["considered"]:
@@ -612,9 +694,39 @@ def render_combat_debug_card(screen, pygame_font_bold, pygame_font_small, x, y, 
         val_txt = f"{v:+.1f}" if v is not None else "(belum dievaluasi)"
         val_color = GOOD if (v is not None and v == best_v) else DIM
         prefix = "-> " if chosen else "   "
-        screen.blit(pygame_font_small.render(f"{prefix}{label}", True, color), (x, y))
+        screen.blit(pygame_font_small.render(f"{prefix}{label}", True, color), (x + 8, y))
         vs = pygame_font_small.render(val_txt, True, val_color)
         screen.blit(vs, (x + width - vs.get_width(), y))
+        y += 17
+    y += 6
+
+    # (1b) POHON KEPUTUSAN — principal variation: jalur lengkap yang NPC
+    # prediksi akan terjadi (giliran NPC & pemain berselang-seling) sampai
+    # depth habis. Ini yang bikin "cara mikir" NPC kelihatan jelas, bukan
+    # cuma angka skor akhir yang abstrak.
+    pv = debug.get("pv") or []
+    if len(pv) > 1:
+        NPC_COL, PLAYER_COL = (130, 200, 255), (255, 180, 120)
+        screen.blit(pygame_font_bold.render("Pohon keputusan (jalur yang diprediksi):", True, (140, 205, 150)), (x, y))
+        y += 18
+        for i, act in enumerate(pv):
+            is_npc_turn = (i % 2 == 0)  # pv[0] selalu giliran NPC (akar)
+            whose = "NPC" if is_npc_turn else "Pemain (diprediksi)"
+            col = NPC_COL if is_npc_turn else PLAYER_COL
+            indent = x + 8 + i * 16          # makin dalam levelnya, makin menjorok -> kesan cabang
+            arrow = "├─" if i < len(pv) - 1 else "└─"
+            label = ACTION_LABEL.get(act, act.value)
+            screen.blit(pygame_font_small.render(f"{arrow} {whose}: {label}", True, col), (indent, y))
+            y += 16
+        y += 2
+        end_val = next((v for a, v in debug["considered"] if a == debug["chosen"]), None)
+        if end_val is not None:
+            tail = pygame_font_small.render(f"   skor di ujung jalur ini: {end_val:+.1f}", True, GOOD)
+            screen.blit(tail, (x + 8, y))
+            y += 17
+    elif pv:
+        screen.blit(pygame_font_small.render(
+            "(depth=1 — NPC cuma lihat 1 langkah ke depan, tanpa prediksi balasan pemain)", True, DIM), (x, y))
         y += 17
     y += 4
 

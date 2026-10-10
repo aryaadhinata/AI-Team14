@@ -32,6 +32,7 @@ import time
 import pygame
 
 import pertarungan as combat  # logika pertarungan giliran (minimax/alpha-beta/dll)
+import optimasi               # banyak musuh: Local Search (Hill Climbing/SA) & CSP (backtracking)
 
 # ---------------------------------------------------------------------------
 # Konfigurasi dasar
@@ -68,6 +69,8 @@ SS = 2  # faktor supersampling untuk gambar karakter (dirender besar lalu diperk
 PLAYER_STEP_MS = 130         # kecepatan jalan normal pemain (tahan tombol)
 NPC_STEP_MS_DEFAULT = 220    # kecepatan jalan normal NPC (real-time)
 COMBAT_TURN_DELAY = 0.8      # jeda (detik) sebelum giliran NPC di pertarungan dieksekusi
+AUTO_STEP_MS = 160           # kecepatan jalan pemain saat Mode Otomatis (ms per petak)
+ENEMY_COLORS = [(230,120,120),(230,190,110),(140,210,140),(130,180,230),(200,140,230)]  # warna label tiap musuh
 BUSH_SLOW_MULT = 2.1         # pengali cooldown langkah saat berada di petak semak
 
 
@@ -541,6 +544,17 @@ class Game:
         self.combat_eval = "hp_diff"            # kunci ke combat.EVAL_FUNCTIONS
         self.combat_pending_action = None       # aksi NPC yg sudah diputuskan, menunggu delay sebelum dieksekusi
         self.combat_turn_timer = 0.0
+        self.combat_enemy_idx = None             # None = pertarungan NPC pengejar lama; angka = index musuh di self.enemies
+        self._multi_eval_fn = None                # gaya tarung musuh saat ini (cuma dipakai kalau combat_enemy_idx terisi)
+
+        # --- banyak musuh: Local Search (Hill Climbing/SA) & CSP (lihat optimasi.py) ---
+        self.player_stats = optimasi.DEFAULT_PLAYER_STATS   # naik tiap menang (reward)
+        self.enemies = []            # [{"idx","pos","alive"}] - diisi spawn_enemies()
+        self.auto_mode = False
+        self.auto_order = []         # urutan index musuh hasil Local Search (Hill Climbing)
+        self.auto_path = None
+        self.auto_timer = 0.0
+        self.last_search_info = None # hasil Local Search/CSP terakhir, buat ditampilkan di dashboard
         
         # arah hadap & animasi
         self.player_facing = "front"
@@ -568,6 +582,56 @@ class Game:
         self.player_timer = self.player_step_ms
         self.npc_timer = 0.0
         self.recompute_npc_path()
+        self.player_stats = optimasi.DEFAULT_PLAYER_STATS
+        self.spawn_enemies()
+        self.auto_mode = False
+        self.auto_order, self.auto_path = [], None
+
+    def spawn_enemies(self):
+        """Sebar ENEMY_ROSTER (optimasi.py) di petak yang bisa dilewati,
+        menjauhi spawn pemain/NPC pengejar & satu sama lain."""
+        n = len(optimasi.ENEMY_ROSTER)
+        avoid = [FIXED_PLAYER_SPAWN, FIXED_NPC_SPAWN]
+        self.enemies = []
+        tries = 0
+        while len(self.enemies) < n and tries < 400:
+            tries += 1
+            r, c = random.randint(2, ROWS - 3), random.randint(2, COLS - 3)
+            pos = nearest_passable_cell(self.passable, r, c)
+            if any(math.hypot(pos[0] - a[0], pos[1] - a[1]) < 3 for a in avoid):
+                continue
+            if any(math.hypot(pos[0] - e["pos"][0], pos[1] - e["pos"][1]) < 3 for e in self.enemies):
+                continue
+            self.enemies.append({"idx": len(self.enemies), "pos": pos, "alive": True})
+        # kalau peta terlalu padat & belum dapat n posisi yang cukup jauh, isi sisanya seadanya
+        while len(self.enemies) < n:
+            pos = nearest_passable_cell(self.passable, random.randint(1, ROWS - 2), random.randint(1, COLS - 2))
+            self.enemies.append({"idx": len(self.enemies), "pos": pos, "alive": True})
+
+    def alive_enemies(self):
+        return [e for e in self.enemies if e["alive"]]
+
+    def check_enemy_contact(self):
+        if self.in_combat:
+            return
+        for e in self.enemies:
+            if e["alive"] and e["pos"] == self.player:
+                self.start_multi_combat(e["idx"])
+                return
+
+    def start_multi_combat(self, enemy_idx):
+        enemy_stats = optimasi.ENEMY_ROSTER[enemy_idx]
+        combat.PLAYER_STATS_OVERRIDE = self.player_stats
+        combat.NPC_STATS_OVERRIDE = enemy_stats
+        self.combat_enemy_idx = enemy_idx
+        self.in_combat = True
+        self._multi_eval_fn = optimasi.ENEMY_EVAL_FN[enemy_idx]   # gaya tarung musuh ini, TIDAK menimpa self.combat_eval
+        self.combat = combat.new_combat()
+        self.combat_log = [f"{enemy_stats.name} menghadang — pertarungan dimulai!"]
+        self.combat_debug = None
+        self.combat_pending_action = None
+        if self.combat.to_move:
+            self._combat_npc_decide()
 
     def respawn(self):
         self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
@@ -603,7 +667,7 @@ class Game:
             self._combat_npc_decide()
 
     def _combat_npc_decide(self):
-        eval_fn = combat.EVAL_FUNCTIONS[self.combat_eval]
+        eval_fn = self._multi_eval_fn or combat.EVAL_FUNCTIONS[self.combat_eval]
         action, dbg = combat.choose_npc_action(
             self.combat, algorithm=self.combat_algo, depth=self.combat_depth, eval_fn=eval_fn)
         self.combat_debug = dbg
@@ -634,18 +698,91 @@ class Game:
             self._combat_npc_resolve()
     
     def _combat_check_end(self):
-        """Kalau pertarungan sudah terminal: tampilkan hasil & kembali ke peta
-        (posisi direset seperti sebelumnya). Return True kalau sudah berakhir."""
+        """Kalau pertarungan sudah terminal: tampilkan hasil. Return True kalau
+        sudah berakhir. Dua jalur: NPC pengejar lama (combat_enemy_idx None,
+        perilaku SAMA seperti sebelumnya) vs musuh dari roster banyak-musuh
+        (reward stat kalau menang, musuh hilang dari peta)."""
         if not self.combat.is_terminal():
             return False
         w = self.combat.winner()
+        self.in_combat = False
+
+        if self.combat_enemy_idx is not None:
+            enemy = self.enemies[self.combat_enemy_idx]
+            enemy_name = optimasi.ENEMY_ROSTER[self.combat_enemy_idx].name
+            if w is False:   # pemain menang
+                enemy["alive"] = False
+                self.player_stats = optimasi.apply_reward(self.player_stats)
+                self.show_toast(f"{enemy_name} dikalahkan! Stat naik.")
+                self.auto_path = None  # paksa hitung ulang rute/urutan Local Search
+            else:  # pemain kalah ATAU seri -> mundur dulu, kalau tidak bisa
+                       # langsung ke-trigger lagi tiap frame krn masih nempel di sel musuh
+                self.show_toast(f"Kalah lawan {enemy_name}. Coba lagi nanti." if w is True
+                                else "Seri (batas giliran habis).")
+                self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
+                self.player_timer = self.player_step_ms
+                self.auto_path = None
+            combat.PLAYER_STATS_OVERRIDE = None
+            combat.NPC_STATS_OVERRIDE = None
+            self.combat_enemy_idx = None
+            self._multi_eval_fn = None
+            return True
+
         msg = ("NPC menang! Posisi direset." if w is True else
                 "Pemain lolos dari pertarungan!" if w is False else
                 "Pertarungan seri (batas giliran habis).")
-        self.in_combat = False
         self.show_toast(msg)
         self.respawn()
         return True
+
+    def toggle_auto_mode(self):
+        self.auto_mode = not self.auto_mode
+        self.auto_path = None
+        if not self.auto_mode:
+            self.show_toast("Mode Otomatis dimatikan")
+            return
+        alive = self.alive_enemies()
+        if not alive:
+            self.auto_mode = False
+            self.show_toast("Semua musuh sudah dikalahkan!")
+            return
+        roster_subset = [optimasi.ENEMY_ROSTER[e["idx"]] for e in alive]
+        order_local, cost, trace = optimasi.hill_climbing(roster_subset, self.player_stats, restarts=12)
+        self.auto_order = [alive[i]["idx"] for i in order_local]
+        self.last_search_info = {"kind": "hill_climbing", "cost": cost,
+                                    "order_names": [optimasi.ENEMY_ROSTER[i].name for i in self.auto_order]}
+        self.show_toast("Mode Otomatis AKTIF (urutan: Hill Climbing)")
+
+    def _poll_auto_mode(self, dt):
+        if not self.auto_mode or self.in_combat:
+            return
+        # cari target musuh berikutnya (urutan hasil Hill Climbing, lewati yg sudah kalah)
+        target = next((idx for idx in self.auto_order
+                        if idx < len(self.enemies) and self.enemies[idx]["alive"]), None)
+        if target is None:
+            self.auto_mode = False
+            self.auto_path = None
+            self.show_toast("Mode Otomatis selesai — semua musuh terjangkau sudah dikalahkan!")
+            return
+        goal = self.enemies[target]["pos"]
+        if not self.auto_path or self.auto_path[-1] != goal or self.auto_path[0] != self.player:
+            res = search(self.grid, self.player, goal, self.diagonal, self.current_heuristic_fn())
+            self.auto_path = res["path"] or [self.player]
+        self.auto_timer += dt * 1000
+        if self.auto_timer < AUTO_STEP_MS:
+            return
+        self.auto_timer = 0.0
+        if len(self.auto_path) > 1:
+            nr, nc = self.auto_path[1]
+            dr, dc = nr - self.player[0], nc - self.player[1]
+            facing, flip = self._facing_from_delta(dr, dc)
+            self.player_facing = facing
+            if dc != 0:
+                self._player_flip_state = flip
+            self.player = (nr, nc)
+            self.player_last_move = time.perf_counter()
+            self.auto_path.pop(0)
+        self.check_enemy_contact()
 
     @staticmethod
     def _facing_from_delta(dr, dc):
@@ -752,6 +889,25 @@ class Game:
             img = pygame.transform.flip(img, True, False)
         self.screen.blit(img, img.get_rect(midbottom=base))
 
+    def _draw_enemy_marker_unit(self, enemy):
+        """Musuh dari roster banyak-musuh (optimasi.py) digambar sbg lingkaran
+        warna + inisial + nama, bukan sprite penuh — biar gampang beda2 'karakter'
+        tanpa perlu aset gambar baru per musuh."""
+        r, c = enemy["pos"]
+        stats = optimasi.ENEMY_ROSTER[enemy["idx"]]
+        color = ENEMY_COLORS[enemy["idx"] % len(ENEMY_COLORS)]
+        cx, cy = c * CELL + CELL // 2, r * CELL + CELL // 2
+        pygame.draw.circle(self.screen, (20, 14, 10), (cx, cy), CELL // 2 - 2)
+        pygame.draw.circle(self.screen, color, (cx, cy), CELL // 2 - 4)
+        pygame.draw.circle(self.screen, (255, 255, 255), (cx, cy), CELL // 2 - 4, 2)
+        letter = self.font_small.render(stats.name[0], True, (20, 14, 10))
+        self.screen.blit(letter, letter.get_rect(center=(cx, cy)))
+        tag = self.font_tiny.render(stats.name, True, (255, 255, 255))
+        shd = self.font_tiny.render(stats.name, True, (0, 0, 0))
+        pos = tag.get_rect(midtop=(cx, r * CELL + CELL + 1))
+        self.screen.blit(shd, pos.move(1, 1))
+        self.screen.blit(tag, pos)
+
     def draw_decor_and_entities(self):
         """Y-sort: semua objek (pohon, properti, pemain, musuh) digambar
         terurut berdasarkan baris petaknya, sehingga objek yang lebih 'dekat'
@@ -779,6 +935,9 @@ class Game:
             (self.npc, self.npc_facing, self.npc_last_move,
             self.assets.enemy_frames, self._npc_flip()),
         ))
+        for e in self.enemies:
+            if e["alive"]:
+                units.append(((e["pos"][0], 1), self._draw_enemy_marker_unit, (e,)))
 
         units.sort(key=lambda u: u[0])
         for _, fn, args in units:
@@ -1056,7 +1215,8 @@ class Game:
         y = self._card_title(x, y, "KONTROL")
         hints = [("WASD", "gerak"), ("Klik", "pindah"), ("1", "A*"), ("2", "UCS"), ("H", "heuristik"),
                 ("G", "diagonal"), ("E", "debug"), ("L", "label angka"), ("M", "mode NPC"), ("T", "giliran"),
-                ("SPACE", "langkah NPC"), ("N", "peta baru"), ("R", "reset"), ("F", "layar penuh"), ("ESC", "keluar")]
+                ("SPACE", "langkah NPC"), ("N", "peta baru"), ("R", "reset"), ("F", "layar penuh"),
+                ("O", "mode otomatis"), ("ESC", "keluar")]
         for i, (k, d) in enumerate(hints):
             hx, hy = x + (i % 2) * (W // 2), y + (i // 2) * 16
             self.screen.blit(self.font_bold.render(k, True, ACC), (hx, hy))
@@ -1074,7 +1234,7 @@ class Game:
         kartu debug NPC (aksi dipertimbangkan + skor + node count, lihat pertarungan.py)."""
         if not self.in_combat:
             return
-        W, H = 560, 460
+        W, H = 560, 580
         x0, y0 = (MAP_W - W) // 2, (MAP_H - H) // 2
         box = pygame.Surface((W, H), pygame.SRCALPHA)
         box.fill((10, 16, 12, 235))
@@ -1144,6 +1304,7 @@ class Game:
             pygame.K_RIGHT: (0, 1), pygame.K_d: (0, 1),
         }
         if key in move_map:
+            self.auto_mode = False
             dr, dc = move_map[key]
             nr, nc = self.player[0] + dr, self.player[1] + dc
             self.try_move_player(nr, nc)
@@ -1174,6 +1335,8 @@ class Game:
             self.npc_timer = 0.0
             self.player_timer = self.player_step_ms
             self.show_toast("Mode GILIRAN aktif" if self.turn_based else "Mode REAL-TIME aktif")
+        elif key == pygame.K_o:
+            self.toggle_auto_mode()
         elif key == pygame.K_f:
             self.toggle_fullscreen()
         elif key == pygame.K_SPACE:
@@ -1259,6 +1422,8 @@ class Game:
 
             self._poll_continuous_movement(dt)
             self._poll_combat(dt)
+            self._poll_auto_mode(dt)
+            self.check_enemy_contact()
 
             if not self.turn_based and self.chase_mode == "auto" and not self.in_combat:
                 self.npc_timer += dt * 1000

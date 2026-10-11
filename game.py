@@ -70,6 +70,7 @@ PLAYER_STEP_MS = 130         # kecepatan jalan normal pemain (tahan tombol)
 NPC_STEP_MS_DEFAULT = 220    # kecepatan jalan normal NPC (real-time)
 COMBAT_TURN_DELAY = 0.8      # jeda (detik) sebelum giliran NPC di pertarungan dieksekusi
 AUTO_STEP_MS = 160           # kecepatan jalan pemain saat Mode Otomatis (ms per petak)
+ENEMY_STEP_MS = 260          # kecepatan jalan musuh roster saat mengejar pemain (ms per petak)
 ENEMY_COLORS = [(230,120,120),(230,190,110),(140,210,140),(130,180,230),(200,140,230)]  # warna label tiap musuh
 BUSH_SLOW_MULT = 2.1         # pengali cooldown langkah saat berada di petak semak
 
@@ -242,6 +243,12 @@ class Assets:
 
         self.player_frames = make_character_frames(player_base)
         self.enemy_frames = make_character_frames(enemy_base)
+
+        # --- musuh roster (optimasi.py): sprite SAMA, cuma warna beda tiap karakter ---
+        self.roster_frames = []
+        for color in ENEMY_COLORS:
+            tinted = {f: tint_surface(img, (*color, 255)) for f, img in player_base.items()}
+            self.roster_frames.append(make_character_frames(tinted))
 
         shadow_crop = _crop(player_sheet, PLAYER_BOXES["shadow"])
         front_crop = _crop(player_sheet, PLAYER_BOXES["front"])
@@ -602,11 +609,17 @@ class Game:
                 continue
             if any(math.hypot(pos[0] - e["pos"][0], pos[1] - e["pos"][1]) < 3 for e in self.enemies):
                 continue
-            self.enemies.append({"idx": len(self.enemies), "pos": pos, "alive": True})
+                self.enemies.append(self._new_enemy_entry(len(self.enemies), pos))
         # kalau peta terlalu padat & belum dapat n posisi yang cukup jauh, isi sisanya seadanya
         while len(self.enemies) < n:
             pos = nearest_passable_cell(self.passable, random.randint(1, ROWS - 2), random.randint(1, COLS - 2))
-            self.enemies.append({"idx": len(self.enemies), "pos": pos, "alive": True})
+            self.enemies.append(self._new_enemy_entry(len(self.enemies), pos))
+
+    @staticmethod
+    def _new_enemy_entry(idx, pos):
+        return {"idx": idx, "pos": pos, "alive": True,
+                "facing": "front", "last_move": 0.0, "flip": False,
+                "path": None, "step_timer": 0.0}
 
     def alive_enemies(self):
         return [e for e in self.enemies if e["alive"]]
@@ -713,12 +726,12 @@ class Game:
             if w is False:   # pemain menang
                 enemy["alive"] = False
                 self.player_stats = optimasi.apply_reward(self.player_stats)
-                self.show_toast(f"{enemy_name} dikalahkan! Stat naik.")
+                self.show_toast(f"{enemy_name} dikalahkan! Stat naik.", duration=5.0)
                 self.auto_path = None  # paksa hitung ulang rute/urutan Local Search
-            else:  # pemain kalah ATAU seri -> mundur dulu, kalau tidak bisa
-                       # langsung ke-trigger lagi tiap frame krn masih nempel di sel musuh
+            else:   # pemain kalah ATAU seri -> mundur dulu, kalau tidak bisa
+                    # langsung ke-trigger lagi tiap frame krn masih nempel di sel musuh
                 self.show_toast(f"Kalah lawan {enemy_name}. Coba lagi nanti." if w is True
-                                else "Seri (batas giliran habis).")
+                                else "Seri (batas giliran habis).", duration=5.0)
                 self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
                 self.player_timer = self.player_step_ms
                 self.auto_path = None
@@ -731,7 +744,7 @@ class Game:
         msg = ("NPC menang! Posisi direset." if w is True else
                 "Pemain lolos dari pertarungan!" if w is False else
                 "Pertarungan seri (batas giliran habis).")
-        self.show_toast(msg)
+        self.show_toast(msg, duration=5.0)
         self.respawn()
         return True
 
@@ -752,6 +765,35 @@ class Game:
         self.last_search_info = {"kind": "hill_climbing", "cost": cost,
                                     "order_names": [optimasi.ENEMY_ROSTER[i].name for i in self.auto_order]}
         self.show_toast("Mode Otomatis AKTIF (urutan: Hill Climbing)")
+
+    def _poll_enemy_chase(self, dt):
+        """Semua musuh roster (optimasi.py) mengejar pemain pakai A*/UCS yang
+        sama dgn NPC pengejar utama, masing-masing kecepatan sendiri
+        (ENEMY_STEP_MS). Tidak boleh 2 musuh menumpuk di petak yang sama —
+        kalau langkah berikutnya sudah ditempati musuh lain yang masih hidup,
+        musuh itu menunggu 1 giliran (dicoba lagi step berikutnya)."""
+        if self.in_combat:
+            return
+        for e in self.enemies:
+            if not e["alive"]:
+                continue
+            e["step_timer"] += dt * 1000
+            if e["step_timer"] < ENEMY_STEP_MS:
+                continue
+            e["step_timer"] = 0.0
+            res = search(self.grid, e["pos"], self.player, self.diagonal, self.current_heuristic_fn())
+            path = res["path"] or [e["pos"]]
+            if len(path) <= 1:
+                continue
+            nxt = path[1]
+            occupied_by_others = {o["pos"] for o in self.enemies if o["alive"] and o is not e}
+            if nxt in occupied_by_others:
+                continue  # petak dituju lagi ditempati musuh lain -> tunggu
+            dr, dc = nxt[0] - e["pos"][0], nxt[1] - e["pos"][1]
+            e["facing"], e["flip"] = self._facing_from_delta(dr, dc)
+            e["pos"] = nxt
+            e["last_move"] = time.perf_counter()
+        self.check_enemy_contact()
 
     def _poll_auto_mode(self, dt):
         if not self.auto_mode or self.in_combat:
@@ -890,23 +932,15 @@ class Game:
         self.screen.blit(img, img.get_rect(midbottom=base))
 
     def _draw_enemy_marker_unit(self, enemy):
-        """Musuh dari roster banyak-musuh (optimasi.py) digambar sbg lingkaran
-        warna + inisial + nama, bukan sprite penuh — biar gampang beda2 'karakter'
-        tanpa perlu aset gambar baru per musuh."""
-        r, c = enemy["pos"]
+        """Musuh dari roster banyak-musuh (optimasi.py): sprite SAMA dgn karakter
+        lain (TX_Player.png), cuma warnanya beda per musuh (lihat Assets.roster_frames),
+        + nama di bawahnya."""
         stats = optimasi.ENEMY_ROSTER[enemy["idx"]]
-        color = ENEMY_COLORS[enemy["idx"] % len(ENEMY_COLORS)]
-        cx, cy = c * CELL + CELL // 2, r * CELL + CELL // 2
-        pygame.draw.circle(self.screen, (20, 14, 10), (cx, cy), CELL // 2 - 2)
-        pygame.draw.circle(self.screen, color, (cx, cy), CELL // 2 - 4)
-        pygame.draw.circle(self.screen, (255, 255, 255), (cx, cy), CELL // 2 - 4, 2)
-        letter = self.font_small.render(stats.name[0], True, (20, 14, 10))
-        self.screen.blit(letter, letter.get_rect(center=(cx, cy)))
-        tag = self.font_tiny.render(stats.name, True, (255, 255, 255))
-        shd = self.font_tiny.render(stats.name, True, (0, 0, 0))
-        pos = tag.get_rect(midtop=(cx, r * CELL + CELL + 1))
-        self.screen.blit(shd, pos.move(1, 1))
-        self.screen.blit(tag, pos)
+        frames = self.assets.roster_frames[enemy["idx"] % len(self.assets.roster_frames)]
+        self._draw_character_unit(enemy["pos"], enemy.get("facing", "front"),
+                                    enemy.get("last_move", 0.0), frames, enemy.get("flip", False))
+        r, c = enemy["pos"]
+        cx = c * CELL + CELL // 2
 
     def draw_decor_and_entities(self):
         """Y-sort: semua objek (pohon, properti, pemain, musuh) digambar
@@ -1427,6 +1461,7 @@ class Game:
 
             if not self.turn_based and self.chase_mode == "auto" and not self.in_combat:
                 self.npc_timer += dt * 1000
+                self._poll_enemy_chase(dt)
                 if self.npc_timer >= self.npc_step_delay:
                     self.npc_timer = 0.0
                     self.npc_step()

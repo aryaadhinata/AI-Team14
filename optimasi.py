@@ -4,14 +4,14 @@ optimasi.py — banyak musuh "karakter" beda stat, player harus mengalahkan
 mereka berurutan (menang = reward stat naik). Dua pendekatan AI buat
 MEMILIH urutannya:
 
-  LOCAL SEARCH & OPTIMIZATION  (§3): cari urutan TERBAIK (minimalkan total
-      HP yang hilang sepanjang rangkaian pertarungan) lewat Hill Climbing
-      (+ random restart) dan Simulated Annealing. Dipakai mode "Otomatis"
-      di game.py.
-  CSP (§4): cari urutan yang SAH (bukan optimal — cukup memenuhi syarat
-      "stat pemain minimum sebelum boleh lawan musuh itu") lewat Backtracking
-      + MRV (Minimum Remaining Values) + LCV (Least Constraining Value) +
-      AC-3 (Arc Consistency).
+LOCAL SEARCH & OPTIMIZATION  (§3): cari urutan TERBAIK (minimalkan total
+    HP yang hilang sepanjang rangkaian pertarungan) lewat Hill Climbing
+    (+ random restart) dan Simulated Annealing. Dipakai mode "Otomatis"
+    di game.py.
+CSP (§4): cari urutan yang SAH (bukan optimal — cukup memenuhi syarat
+    "stat pemain minimum sebelum boleh lawan musuh itu") lewat Backtracking
+    + MRV (Minimum Remaining Values) + LCV (Least Constraining Value) +
+    AC-3 (Arc Consistency).
 
 ======================================================================
 DEFINISI FORMAL — LOCAL SEARCH
@@ -32,10 +32,10 @@ DEFINISI FORMAL — CSP
 ======================================================================
 VARIABLES   : satu per musuh (0..N-1)
 DOMAIN(e)   : slot urutan {1..N} yang "layak" buat musuh e — slot k layak
-              kalau kekuatan pemain SEBELUM duel ke-k (yaitu setelah k-1
-              kemenangan beruntun, lihat slot_power_table) >= required_power(e)
+                kalau kekuatan pemain SEBELUM duel ke-k (yaitu setelah k-1
+                kemenangan beruntun, lihat slot_power_table) >= required_power(e)
 CONSTRAINT  : all-different (tiap slot cuma dipakai 1 musuh) — binary
-              constraint antar SETIAP pasang variabel
+                constraint antar SETIAP pasang variabel
 ======================================================================
 """
 import math
@@ -61,7 +61,7 @@ ENEMY_ROSTER = [
 # gaya tarung NPC tiap musuh saat combat sungguhan (biar kelihatan "beda karakter",
 # bukan cuma beda angka) — dipetakan 1:1 dgn ENEMY_ROSTER lewat index
 ENEMY_EVAL_FN = [combat.eval_aggressive, combat.eval_defensive, combat.eval_hp_diff,
-                 combat.eval_stance_aware, combat.eval_aggressive]
+                combat.eval_stance_aware, combat.eval_aggressive]
 
 DEFAULT_PLAYER_STATS = combat.Stats(name="Pemain", max_hp=100, atk_min=10, atk_max=25,
                                     hit_base=0.70, hit_cap=0.85)

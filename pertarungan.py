@@ -618,9 +618,9 @@ def choose_npc_action(state, algorithm="alphabeta", depth=4, eval_fn=eval_hp_dif
     debug['considered'] = [(Action, skor_atau_None, pv_setelah_aksi_ini), ...]  — overlay #1
     debug['nodes']      = total node yang dieksplorasi                          — overlay #2
     debug['pv']         = [aksi_akar] + pv_cabang_terpilih — JALUR LENGKAP yang
-                           diprediksi NPC (giliran NPC/Pemain berselang-seling),
-                           dipakai overlay "pohon keputusan" supaya kelihatan
-                           bukan cuma skor akhir tapi URUTAN langkah yang dipikirkan.
+                            diprediksi NPC (giliran NPC/Pemain berselang-seling),
+                            dipakai overlay "pohon keputusan" supaya kelihatan
+                            bukan cuma skor akhir tapi URUTAN langkah yang dipikirkan.
     """
     order = list(action_order) if action_order else list(ACTIONS)
     counters = {"nodes": 0, "pruned": 0}

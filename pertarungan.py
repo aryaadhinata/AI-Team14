@@ -56,7 +56,7 @@ ATTACK_DMG_MIN, ATTACK_DMG_MAX = 16, 30      # poin damage saat serangan BERHASI
 ATTACK_DMG_WEIGHTS = [13, 8, 5, 3, 2, 1]     # bobot utk nilai 10,13,16,19,22,25 berurutan (10 paling jarang)
 ATTACK_HIT_BASE, ATTACK_HIT_CAP = 0.70, 0.85  # peluang serangan berhasil: 70% -> naik fibonacci -> maks 85%
 
-DEFEND_BASE_PENETRATION = 0.2   # bertahan pertama kali: cuma 20% damage yang masuk
+DEFEND_BASE_PENETRATION = 0.5   # bertahan pertama kali: 50% damage yang masuk (sesuai docstring; dulu 0.2 = terlalu kuat)
 DEFEND_CAP_PENETRATION = 1.0    # makin sering bertahan BERUNTUN, makin tembus (fibonacci), maks 100%
 
 HEAL_BASE = 15
@@ -65,12 +65,23 @@ HEAL_BONUS_CHANCE = 0.25         # peluang dapat heal "kritikal" di atas nilai d
 HEAL_MULT_MIN, HEAL_MULT_MAX = 1.10, 1.67
 HEAL_MULT_WEIGHTS = [13, 8, 5, 3, 2, 1]      # sama polanya: 1.10 paling umum, 1.67 paling jarang
 
-PARRY_REFLECT_MIN, PARRY_REFLECT_MAX = 0.5, 2.0   # tangkisan: pantulkan 0.5x - 2x damage yg masuk, uniform
+PARRY_REFLECT_MIN, PARRY_REFLECT_MAX = 0.3, 0.9   # tangkisan: pantulkan 0.3x - 0.9x damage yg masuk, uniform (dulu 0.5-2.0: memantulkan damage pemain sendiri terlalu mematikan)
 
 FIB_TERMS = 8            # panjang deret fibonacci yang dipakai sbg "kurva" kenaikan peluang
 HP_LEVEL_BUCKET = 12      # tiap 12 HP hilang = naik 1 "level" di kurva fibonacci
 
 MAX_TURNS = 20               # batas ronde -> batas kedalaman tree (lihat TERMINAL TEST)
+
+# Anti-kebuntuan: stance (defend/parry) kelihatan lawan, jadi duel yang main aman bisa
+# macet sampai MAX_TURNS. Mulai ronde ENRAGE_START semua damage naik ENRAGE_STEP per
+# ronde ("kelelahan/amukan") supaya duel pasti berujung; kalau tetap habis waktu,
+# pemenang = yang HP-nya lebih tinggi (lihat CombatState.winner()).
+ENRAGE_START, ENRAGE_STEP = 8, 0.10
+DRAW_MARGIN = 0.05           # selisih rasio HP minimal saat habis waktu agar tidak dianggap seri
+
+
+def enrage_mult(turn):
+    return 1.0 + ENRAGE_STEP * max(0, turn - ENRAGE_START)
 
 
 def _fibonacci(n_terms):
@@ -116,6 +127,8 @@ class Stats:
     atk_max: int
     hit_base: float
     hit_cap: float
+    depth: int = 4          # kedalaman pencarian NPC (musuh lemah = pandangan lebih pendek)
+    mistake: float = 0.0    # peluang NPC memilih aksi terbaik KEDUA (salah langkah manusiawi)
 
 
 PLAYER_STATS_OVERRIDE = None   # Stats | None — di-set game.py sebelum start_combat()
@@ -239,6 +252,12 @@ class CombatState:
             return True
         if self.npc_hp <= 0:
             return False
+        if self.turn >= MAX_TURNS:   # habis waktu -> yang HP-nya (rasio) lebih tinggi menang
+            diff = self.npc_hp / _max_hp("npc") - self.player_hp / _max_hp("player")
+            if diff > DRAW_MARGIN:
+                return True
+            if diff < -DRAW_MARGIN:
+                return False
         return None
 
 
@@ -275,7 +294,7 @@ def apply_action(state: CombatState, action: Action):
             hit = random.random() < attack_hit_chance(npc_hp, "npc")
             event["hit"] = hit
             if hit:
-                dmg = roll_attack_damage("npc")
+                dmg = round(roll_attack_damage("npc") * enrage_mult(state.turn))
                 if player_last == Action.PARRY:
                     reflect = round(dmg * random.uniform(PARRY_REFLECT_MIN, PARRY_REFLECT_MAX))
                     npc_hp -= reflect
@@ -304,7 +323,7 @@ def apply_action(state: CombatState, action: Action):
             hit = random.random() < attack_hit_chance(player_hp, "player")
             event["hit"] = hit
             if hit:
-                dmg = roll_attack_damage("player")
+                dmg = round(roll_attack_damage("player") * enrage_mult(state.turn))
                 if npc_last == Action.PARRY:
                     reflect = round(dmg * random.uniform(PARRY_REFLECT_MIN, PARRY_REFLECT_MAX))
                     player_hp -= reflect
@@ -343,6 +362,8 @@ def apply_action_expected(state: CombatState, action: Action) -> CombatState:
     player_last, npc_last = state.player_last, state.npc_last
     p_streak, n_streak = state.player_defend_streak, state.npc_defend_streak
 
+    em = enrage_mult(state.turn)
+
     def expected_heal(hp, side):
         p_heal = heal_chance(hp, side)
         e_amount = ((1 - HEAL_BONUS_CHANCE) * HEAL_BASE
@@ -353,9 +374,9 @@ def apply_action_expected(state: CombatState, action: Action) -> CombatState:
         if action == Action.ATTACK:
             p_hit = attack_hit_chance(npc_hp, "npc")
             if player_last == Action.PARRY:
-                npc_hp -= p_hit * expected_attack_damage("npc") * EXPECTED_PARRY_MULT
+                npc_hp -= p_hit * expected_attack_damage("npc") * em * EXPECTED_PARRY_MULT
             else:
-                dmg = p_hit * expected_attack_damage("npc")
+                dmg = p_hit * expected_attack_damage("npc") * em
                 if player_last == Action.DEFEND:
                     dmg *= defend_penetration(p_streak)
                 player_hp -= dmg
@@ -367,9 +388,9 @@ def apply_action_expected(state: CombatState, action: Action) -> CombatState:
         if action == Action.ATTACK:
             p_hit = attack_hit_chance(player_hp, "player")
             if npc_last == Action.PARRY:
-                player_hp -= p_hit * expected_attack_damage("player") * EXPECTED_PARRY_MULT
+                player_hp -= p_hit * expected_attack_damage("player") * em * EXPECTED_PARRY_MULT
             else:
-                dmg = p_hit * expected_attack_damage("player")
+                dmg = p_hit * expected_attack_damage("player") * em
                 if npc_last == Action.DEFEND:
                     dmg *= defend_penetration(n_streak)
                 npc_hp -= dmg
@@ -590,8 +611,10 @@ ALGORITHMS = {
 # ---------------------------------------------------------------------------
 
 def choose_npc_action(state, algorithm="alphabeta", depth=4, eval_fn=eval_hp_diff,
-                    action_order=None, node_budget=60, player_policy=None):
+                    action_order=None, node_budget=60, player_policy=None, mistake=0.0):
     """Return (aksi_terpilih: Action, debug: dict).
+    mistake: peluang NPC memilih aksi terbaik KEDUA (bukan yang terbaik) — dipakai
+    musuh level rendah agar tidak 'sempurna'. Hanya mengubah pilihan akhir, bukan pencarian.
     debug['considered'] = [(Action, skor_atau_None, pv_setelah_aksi_ini), ...]  — overlay #1
     debug['nodes']      = total node yang dieksplorasi                          — overlay #2
     debug['pv']         = [aksi_akar] + pv_cabang_terpilih — JALUR LENGKAP yang
@@ -625,7 +648,9 @@ def choose_npc_action(state, algorithm="alphabeta", depth=4, eval_fn=eval_hp_dif
 
     scored = [(a, v, pv) for a, v, pv in considered if v is not None]
     if scored:
-        best_action, _, best_pv_rest = max(scored, key=lambda x: x[1])
+        ranked = sorted(scored, key=lambda x: x[1], reverse=True)
+        pick = ranked[1] if (len(ranked) > 1 and random.random() < mistake) else ranked[0]
+        best_action, _, best_pv_rest = pick
     else:
         best_action, best_pv_rest = random.choice(order), []
 
@@ -683,7 +708,8 @@ def render_combat_debug_card(screen, pygame_font_bold, pygame_font_small, x, y, 
     y += 18
 
     # (1) aksi yang dipertimbangkan di giliran INI & skornya, aksi terpilih disorot
-    screen.blit(pygame_font_small.render("Opsi giliran ini:", True, DIM), (x, y))
+    label = "Pratinjau analisis NPC (belum giliran NPC):" if debug.get("preview") else "Opsi giliran ini:"
+    screen.blit(pygame_font_small.render(label, True, DIM), (x, y))
     y += 16
     scored = [(a, v) for a, v in debug["considered"] if v is not None]
     best_v = max(v for _, v in scored) if scored else None

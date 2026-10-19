@@ -24,6 +24,7 @@ Kontrol:
 
 import heapq
 import math
+from dataclasses import replace
 import os
 import random
 import sys
@@ -71,6 +72,7 @@ NPC_STEP_MS_DEFAULT = 220    # kecepatan jalan normal NPC (real-time)
 COMBAT_TURN_DELAY = 0.8      # jeda (detik) sebelum giliran NPC di pertarungan dieksekusi
 AUTO_STEP_MS = 160           # kecepatan jalan pemain saat Mode Otomatis (ms per petak)
 ENEMY_STEP_MS = 260          # kecepatan jalan musuh roster saat mengejar pemain (ms per petak)
+ENEMY_RING_BASE, ENEMY_RING_STEP, ENEMY_RING_TOL = 6, 3, 0   # musuh ke-i di jarak (langkah) BASE + i*STEP dari spawn pemain, toleransi +-TOL -> urutan tiba = urutan kesulitan
 ENEMY_MIN_DIST_FROM_PLAYER = 7   # jarak minimum spawn musuh roster ke titik spawn pemain (petak)
 ENEMY_COLORS = [(230,120,120),(230,190,110),(140,210,140),(130,180,230),(200,140,230)]  # warna label tiap musuh
 BUSH_SLOW_MULT = 2.1         # pengali cooldown langkah saat berada di petak semak
@@ -127,7 +129,7 @@ CHAR_ANIM_PAD = 5      # px ruang ekstra di atas sprite karakter utk animasi "ho
 
 
 def _load_sheet(name):
-    path = os.path.join(ASSET_DIR, name)
+    path = os.path.join(ASSET_DIR, name.replace("\\", os.sep))   # jalur 'assets\\x.png' juga jalan di Linux/macOS
     return pygame.image.load(path).convert_alpha()
 
 
@@ -477,6 +479,17 @@ def farthest_passable_cell(passable, frm):
     return max(passable, key=lambda p: max(abs(p[0] - frm[0]), abs(p[1] - frm[1])))
 
 
+def bfs_steps(grid, start):
+    """Jarak dalam LANGKAH (8 arah, sama dgn gerak pengejaran musuh) dari start ke tiap petak."""
+    dist, q = {start: 0}, [start]
+    for cur in q:
+        for nb in neighbors_of(grid, cur[0], cur[1], True):
+            if nb not in dist:
+                dist[nb] = dist[cur] + 1
+                q.append(nb)
+    return dist
+
+
 def generate_map():
     attempts = 0
     g = blank_grid()
@@ -602,14 +615,25 @@ class Game:
         n = len(optimasi.ENEMY_ROSTER)
         self.enemies = []
         for i in range(n):
-            self.enemies.append(self._new_enemy_entry(i, self._random_enemy_position()))
+            self.enemies.append(self._new_enemy_entry(i, self._random_enemy_position(ring_idx=i)))
 
-    def _random_enemy_position(self, exclude_enemy=None):
+    def _random_enemy_position(self, exclude_enemy=None, ring_idx=None):
         """Cari 1 posisi acak yang SAH — konstrain sama persis dgn spawn_enemies:
         >=ENEMY_MIN_DIST_FROM_PLAYER dari spawn pemain, >=3 dari spawn NPC
         pengejar, >=3 dari musuh lain yg masih hidup. Dipakai saat spawn awal
         DAN saat reposisi musuh setelah pemain kalah/seri lawan dia."""
         others = [e for e in self.enemies if e is not exclude_enemy and e.get("alive", True)]
+        # CINCIN JARAK: musuh ke-ring_idx ditaruh ~ BASE + idx*STEP langkah dari pemain, jadi
+        # yang paling mudah (idx kecil) paling dekat & tiba duluan; yang tersulit paling jauh.
+        if ring_idx is not None:
+            dist = bfs_steps(self.grid, nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN))
+            target = ENEMY_RING_BASE + ring_idx * ENEMY_RING_STEP
+            for tol in range(ENEMY_RING_TOL, ENEMY_RING_TOL + 4):   # longgarkan bertahap kalau peta padat
+                cand = [p for p, d in dist.items() if abs(d - target) <= tol
+                        and math.hypot(p[0] - FIXED_NPC_SPAWN[0], p[1] - FIXED_NPC_SPAWN[1]) >= 3
+                        and all(math.hypot(p[0] - o["pos"][0], p[1] - o["pos"][1]) >= 3 for o in others)]
+                if cand:
+                    return random.choice(cand)
         for _ in range(600):
             r, c = random.randint(1, ROWS - 2), random.randint(1, COLS - 2)
             pos = nearest_passable_cell(self.passable, r, c)
@@ -652,12 +676,26 @@ class Game:
         self.combat_enemy_idx = enemy_idx
         self.in_combat = True
         self._multi_eval_fn = optimasi.ENEMY_EVAL_FN[enemy_idx]   # gaya tarung musuh ini, TIDAK menimpa self.combat_eval
-        self.combat = combat.new_combat()
+        self.combat = combat.new_combat(npc_starts=False)   # pemain menyerang duluan (kontak terjadi karena pemain/musuh bertemu)
         self.combat_log = [f"{enemy_stats.name} menghadang — pertarungan dimulai!"]
         self.combat_debug = None
         self.combat_pending_action = None
         if self.combat.to_move:
             self._combat_npc_decide()
+        else:
+            self._combat_preview_debug()
+
+    def _combat_preview_debug(self):
+        """Pemain jalan duluan -> isi kartu debug LANGSUNG saat duel mulai dengan
+        pratinjau analisis NPC (seandainya NPC yang jalan sekarang), supaya overlay
+        tidak kosong sebelum NPC mengambil keputusan nyata."""
+        eval_fn = self._multi_eval_fn or combat.EVAL_FUNCTIONS[self.combat_eval]
+        est = combat.NPC_STATS_OVERRIDE if self.combat_enemy_idx is not None else None
+        _, dbg = combat.choose_npc_action(
+            replace(self.combat, to_move=True), algorithm=self.combat_algo,
+            depth=est.depth if est else self.combat_depth, eval_fn=eval_fn)
+        dbg["preview"] = True
+        self.combat_debug = dbg
 
     def respawn(self):
         self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
@@ -691,11 +729,16 @@ class Game:
         self.combat_pending_action = None
         if self.combat.to_move:
             self._combat_npc_decide()
+        else:
+            self._combat_preview_debug()
 
     def _combat_npc_decide(self):
         eval_fn = self._multi_eval_fn or combat.EVAL_FUNCTIONS[self.combat_eval]
+        est = combat.NPC_STATS_OVERRIDE if self.combat_enemy_idx is not None else None
         action, dbg = combat.choose_npc_action(
-            self.combat, algorithm=self.combat_algo, depth=self.combat_depth, eval_fn=eval_fn)
+            self.combat, algorithm=self.combat_algo,
+            depth=est.depth if est else self.combat_depth, eval_fn=eval_fn,
+            mistake=est.mistake if est else 0.0)
         self.combat_debug = dbg
         self.combat_pending_action = action
         self.combat_turn_timer = COMBAT_TURN_DELAY
@@ -751,10 +794,10 @@ class Game:
             else:  # pemain kalah ATAU seri -> mundur dulu, kalau tidak bisa
                        # langsung ke-trigger lagi tiap frame krn masih nempel di sel musuh
                 self.show_toast(f"Kalah lawan {enemy_name}. Coba lagi nanti." if w is True
-                                else "Seri (batas giliran habis).", duration=5.0)
+                                else "Seri (HP imbang saat batas giliran habis).", duration=5.0)
                 self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
                 self.player_timer = self.player_step_ms
-                enemy["pos"] = self._random_enemy_position(exclude_enemy=enemy)
+                enemy["pos"] = self._random_enemy_position(exclude_enemy=enemy, ring_idx=enemy["idx"])
                 enemy["path"] = None
                 self.auto_path = None
             combat.PLAYER_STATS_OVERRIDE = None
@@ -854,6 +897,17 @@ class Game:
             self.player = (nr, nc)
             self.player_last_move = time.perf_counter()
             self.auto_path.pop(0)
+            # mode GILIRAN: tiap langkah otomatis pemain = 1 giliran, jadi NPC pengejar
+            # DAN semua musuh lain ikut melangkah (sama seperti try_move_player).
+            # Mode real-time sudah ditangani _poll_enemy_chase().
+            if self.turn_based:
+                self.recompute_npc_path()
+                if self.npc != self.player:
+                    self.npc_step()
+                if not self.in_combat:
+                    for e in self.enemies:
+                        if e["alive"]:
+                            self._step_single_enemy(e)
         self.check_enemy_contact()
 
     @staticmethod

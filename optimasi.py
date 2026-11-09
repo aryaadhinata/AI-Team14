@@ -4,14 +4,14 @@ optimasi.py — banyak musuh "karakter" beda stat, player harus mengalahkan
 mereka berurutan (menang = reward stat naik). Dua pendekatan AI buat
 MEMILIH urutannya:
 
-  LOCAL SEARCH & OPTIMIZATION  (§3): cari urutan TERBAIK (minimalkan total
-      HP yang hilang sepanjang rangkaian pertarungan) lewat Hill Climbing
-      (+ random restart) dan Simulated Annealing. Dipakai mode "Otomatis"
-      di game.py.
-  CSP (§4): cari urutan yang SAH (bukan optimal — cukup memenuhi syarat
-      "stat pemain minimum sebelum boleh lawan musuh itu") lewat Backtracking
-      + MRV (Minimum Remaining Values) + LCV (Least Constraining Value) +
-      AC-3 (Arc Consistency).
+LOCAL SEARCH & OPTIMIZATION  (§3): cari urutan TERBAIK (minimalkan total
+    HP yang hilang sepanjang rangkaian pertarungan) lewat Hill Climbing
+    (+ random restart) dan Simulated Annealing. Dipakai mode "Otomatis"
+    di game.py.
+CSP (§4): cari urutan yang SAH (bukan optimal — cukup memenuhi syarat
+    "stat pemain minimum sebelum boleh lawan musuh itu") lewat Backtracking
+    + MRV (Minimum Remaining Values) + LCV (Least Constraining Value) +
+    AC-3 (Arc Consistency).
 
 ======================================================================
 DEFINISI FORMAL — LOCAL SEARCH
@@ -32,10 +32,10 @@ DEFINISI FORMAL — CSP
 ======================================================================
 VARIABLES   : satu per musuh (0..N-1)
 DOMAIN(e)   : slot urutan {1..N} yang "layak" buat musuh e — slot k layak
-              kalau kekuatan pemain SEBELUM duel ke-k (yaitu setelah k-1
-              kemenangan beruntun, lihat slot_power_table) >= required_power(e)
+                kalau kekuatan pemain SEBELUM duel ke-k (yaitu setelah k-1
+                kemenangan beruntun, lihat slot_power_table) >= required_power(e)
 CONSTRAINT  : all-different (tiap slot cuma dipakai 1 musuh) — binary
-              constraint antar SETIAP pasang variabel
+                constraint antar SETIAP pasang variabel
 ======================================================================
 """
 import math
@@ -47,18 +47,21 @@ import pertarungan as combat
 # 1. ROSTER MUSUH — 5 karakter, stat & gaya tarung (eval function) beda-beda
 # ---------------------------------------------------------------------------
 
+# depth = kedalaman pencarian minimax/alpha-beta musuh; mistake = peluang musuh memilih aksi
+# terbaik KEDUA. Musuh awal 'berpikir pendek' dan sering salah langkah, musuh akhir hampir
+# sempurna -> kesulitan naik halus. Angka hasil tuning simulasi (lihat LAPORAN_BALANCE.md).
 ENEMY_ROSTER = [
-    combat.Stats(name="Pemburu Liar",      max_hp=60,  atk_min=8,  atk_max=18, hit_base=0.65, hit_cap=0.80),
-    combat.Stats(name="Penjaga Hutan",     max_hp=90,  atk_min=10, atk_max=22, hit_base=0.68, hit_cap=0.82),
-    combat.Stats(name="Pendekar Bayangan", max_hp=115, atk_min=12, atk_max=26, hit_base=0.70, hit_cap=0.85),
-    combat.Stats(name="Ksatria Besi",      max_hp=140, atk_min=14, atk_max=28, hit_base=0.72, hit_cap=0.86),
-    combat.Stats(name="Naga Kecil",        max_hp=170, atk_min=16, atk_max=32, hit_base=0.75, hit_cap=0.88),
+    combat.Stats(name="Pemburu Liar",      max_hp=60,  atk_min=12, atk_max=27, hit_base=0.60, hit_cap=0.74, depth=2, mistake=0.35),
+    combat.Stats(name="Penjaga Hutan",     max_hp=85,  atk_min=13, atk_max=29, hit_base=0.62, hit_cap=0.76, depth=2, mistake=0.25),
+    combat.Stats(name="Pendekar Bayangan", max_hp=110, atk_min=15, atk_max=32, hit_base=0.64, hit_cap=0.78, depth=3, mistake=0.18),
+    combat.Stats(name="Ksatria Besi",      max_hp=135, atk_min=14, atk_max=32, hit_base=0.66, hit_cap=0.80, depth=3, mistake=0.10),
+    combat.Stats(name="Naga Kecil",        max_hp=160, atk_min=16, atk_max=35, hit_base=0.68, hit_cap=0.82, depth=4, mistake=0.04),
 ]
 
 # gaya tarung NPC tiap musuh saat combat sungguhan (biar kelihatan "beda karakter",
 # bukan cuma beda angka) — dipetakan 1:1 dgn ENEMY_ROSTER lewat index
 ENEMY_EVAL_FN = [combat.eval_aggressive, combat.eval_defensive, combat.eval_hp_diff,
-                 combat.eval_stance_aware, combat.eval_aggressive]
+                combat.eval_stance_aware, combat.eval_aggressive]
 
 DEFAULT_PLAYER_STATS = combat.Stats(name="Pemain", max_hp=100, atk_min=10, atk_max=25,
                                     hit_base=0.70, hit_cap=0.85)

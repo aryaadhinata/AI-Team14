@@ -19,10 +19,15 @@ Kontrol:
     - SPACE         : lewati giliran pemain (mode giliran) — musuh membalas 1 langkah
     - N             : peta baru
     - R             : reset posisi (respawn)
+    - O             : Mode Otomatis — pemain mengejar musuh termudah (greedy)
+    - P             : Local Search (Hill Climbing + SA) dibanding greedy & brute-force
+    - C             : CSP (backtracking + MRV + LCV + AC-3); tekan lagi = ganti margin
+    - X             : tutup panel hasil P / C
     - ESC           : keluar
 """
 
 import heapq
+import itertools
 import math
 from dataclasses import replace
 import os
@@ -74,6 +79,7 @@ SS = 2  # faktor supersampling untuk gambar karakter (dirender besar lalu diperk
 PLAYER_STEP_MS = 130         # kecepatan jalan normal pemain (tahan tombol)
 COMBAT_TURN_DELAY = 0.8      # jeda (detik) sebelum giliran NPC di pertarungan dieksekusi
 AUTO_STEP_MS = 160           # kecepatan jalan pemain saat Mode Otomatis (ms per petak)
+CSP_MARGINS = (0.5, 0.8, 1.0, 1.3)   # margin syarat stat CSP yang dicoba bergantian (tombol C)
 ENEMY_STEP_MS = 260          # kecepatan jalan musuh roster saat mengejar pemain (ms per petak)
 ENEMY_RING_BASE, ENEMY_RING_STEP, ENEMY_RING_TOL = 6, 3, 0   # musuh ke-i di jarak (langkah) BASE + i*STEP dari spawn pemain, toleransi +-TOL -> urutan tiba = urutan kesulitan
 ENEMY_MIN_DIST_FROM_PLAYER = 7   # jarak minimum spawn musuh roster ke titik spawn pemain (petak)
@@ -570,10 +576,10 @@ class Game:
         self.player_stats = optimasi.DEFAULT_PLAYER_STATS   # naik tiap menang (reward)
         self.enemies = []            # [{"idx","pos","alive"}] - diisi spawn_enemies()
         self.auto_mode = False
-        self.auto_order = []         # urutan index musuh hasil Local Search (Hill Climbing)
         self.auto_path = None
         self.auto_timer = 0.0
-        self.last_search_info = None # hasil Local Search/CSP terakhir, buat ditampilkan di dashboard
+        self.last_search_info = None # hasil Local Search/CSP terakhir -> panel (draw_opt_panel), tombol P / C
+        self.csp_margin_idx = 0      # tombol C: tiap tekan memakai margin berikutnya dari CSP_MARGINS
         
         # arah hadap & animasi
         self.player_facing = "front"
@@ -599,7 +605,8 @@ class Game:
         self._search_key = None
         self.refresh_search()
         self.auto_mode = False
-        self.auto_order, self.auto_path = [], None
+        self.auto_path = None
+        self.last_search_info = None   # hasil lama tidak berlaku utk peta baru
 
     def spawn_enemies(self):
         """Sebar ENEMY_ROSTER (optimasi.py) di petak yang bisa dilewati — minimal
@@ -821,6 +828,88 @@ class Game:
             self.show_toast("Semua musuh sudah dikalahkan!")
             return
         self.show_toast("Mode Otomatis AKTIF — mengejar musuh termudah dulu")
+
+    # ---------------- Panel hasil Local Search & CSP (tombol P / C) ----------------
+    def _alive_roster(self):
+        """(ids, roster): index ENEMY_ROSTER & Stats dari musuh yang MASIH HIDUP."""
+        ids = [e["idx"] for e in self.alive_enemies()]
+        return ids, [optimasi.ENEMY_ROSTER[i] for i in ids]
+
+    @staticmethod
+    def _fmt_order(order, ids):
+        """order lokal [2,0,1] + ids [0,1,3] -> '4 > 1 > 2' (nomor musuh = index roster + 1)."""
+        return " > ".join(str(ids[k] + 1) for k in order)
+
+    def run_local_search(self):
+        """Tombol P: Hill Climbing & Simulated Annealing mencari urutan lawan terbaik atas
+        musuh yang masih hidup, dibandingkan dengan brute-force (optimum pasti) dan urutan
+        greedy yang dipakai Mode Otomatis. Biaya = total HP terkuras sepanjang rangkaian duel."""
+        ids, roster = self._alive_roster()
+        if len(roster) < 2:
+            self.show_toast("Local Search butuh minimal 2 musuh hidup")
+            return
+        base, n = self.player_stats, len(roster)
+        cost_of = lambda o: optimasi.evaluate_order(list(o), base, roster)
+
+        t = time.perf_counter()
+        hc_o, hc_c, _ = optimasi.hill_climbing(roster, base, restarts=12, seed=3)
+        t_hc = (time.perf_counter() - t) * 1000
+        t = time.perf_counter()
+        sa_o, sa_c, _ = optimasi.simulated_annealing(roster, base, iterations=400, seed=3)
+        t_sa = (time.perf_counter() - t) * 1000
+        t = time.perf_counter()
+        bf_o = min(itertools.permutations(range(n)), key=cost_of)
+        bf_c = cost_of(bf_o)
+        t_bf = (time.perf_counter() - t) * 1000
+        gr_o = sorted(range(n), key=lambda k: optimasi.power(roster[k]))   # pilihan Mode Otomatis
+        gr_c = cost_of(gr_o)
+
+        f = lambda o: self._fmt_order(o, ids)
+        col = lambda c: "good" if c <= bf_c + 1e-6 else "bad"
+        gap = lambda c: "optimal" if c <= bf_c + 1e-6 else f"+{c - bf_c:.0f} dari optimal"
+        self.last_search_info = {
+            "title": "LOCAL SEARCH · urutan lawan terbaik",
+            "lines": [
+                (f"Hill Climbing : {f(hc_o)}", col(hc_c)),
+                (f"   biaya {hc_c:.0f} · {t_hc:.0f} ms · {gap(hc_c)}", "dim"),
+                (f"Sim. Annealing: {f(sa_o)}", col(sa_c)),
+                (f"   biaya {sa_c:.0f} · {t_sa:.0f} ms · {gap(sa_c)}", "dim"),
+                (f"Brute-force   : {f(bf_o)}", "acc"),
+                (f"   biaya {bf_c:.0f} · {t_bf:.0f} ms · optimum pasti ({n}! urutan)", "dim"),
+                (f"Greedy (O)    : {f(gr_o)}", col(gr_c)),
+                (f"   biaya {gr_c:.0f} · {gap(gr_c)}", "dim"),
+                ("Angka = nomor musuh. Biaya = total HP terkuras.", "dim"),
+            ],
+        }
+
+    def run_csp(self):
+        """Tombol C: CSP (backtracking + MRV + LCV + AC-3) mencari urutan lawan yang SAH.
+        Tiap tekan memakai margin syarat stat berikutnya (CSP_MARGINS), sehingga terlihat
+        kapan soal feasible dan kapan AC-3 menolaknya sebelum backtracking jalan."""
+        ids, roster = self._alive_roster()
+        if not roster:
+            self.show_toast("Semua musuh sudah dikalahkan!")
+            return
+        margin = CSP_MARGINS[self.csp_margin_idx % len(CSP_MARGINS)]
+        self.csp_margin_idx += 1
+        order, log = optimasi.backtracking_search(roster, self.player_stats, margin=margin)
+        lines = [(f"Syarat: kekuatan pemain >= {margin} x kekuatan musuh", "dim")]
+        if order is None:
+            lines.append(("TIDAK ADA SOLUSI", "bad"))
+            lines.append(("Tidak ada urutan yang memenuhi syarat stat minimum.", "txt"))
+            if log["nodes"] == 0:
+                lines.append(("Ditolak AC-3/domain awal: 0 node backtracking.", "acc"))
+        else:
+            base = self.player_stats
+            cost = optimasi.evaluate_order(order, base, roster)
+            gr_o = sorted(range(len(roster)), key=lambda k: optimasi.power(roster[k]))
+            gr_c = optimasi.evaluate_order(gr_o, base, roster)
+            lines.append((f"SOLUSI: {self._fmt_order(order, ids)}", "good"))
+            lines.append((f"Biaya HP urutan ini {cost:.0f} (greedy {gr_c:.0f})", "txt"))
+            lines.append(("CSP menjamin urutan SAH, bukan yang paling hemat.", "dim"))
+        lines.append((f"Node {log['nodes']} · backtrack {log['backtracks']} · revisi AC-3 {log['ac3_revisions']}", "txt"))
+        lines.append(("Tekan C lagi = margin berikutnya.", "dim"))
+        self.last_search_info = {"title": "CSP · backtracking + MRV + LCV + AC-3", "lines": lines}
 
     def _easiest_alive_enemy(self):
         """Local Search (greedy): dari musuh yang masih hidup, pilih yang
@@ -1402,7 +1491,7 @@ class Game:
         hints = [("WASD", "gerak"), ("Klik", "pindah"), ("1", "A*"), ("2", "UCS"), ("H", "heuristik"),
                 ("G", "diagonal"), ("E", "debug"), ("L", "label angka"), ("TAB", "target debug"), ("T", "giliran"),
                 ("SPACE", "lewati"), ("N", "peta baru"), ("R", "reset"), ("F", "layar penuh"),
-                ("O", "mode otomatis"), ("ESC", "keluar")]
+                ("O", "otomatis"), ("P", "local search"), ("C", "CSP"), ("X", "tutup panel"), ("ESC", "keluar")]
         for i, (k, d) in enumerate(hints):
             hx, hy = x + (i % 2) * (W // 2), y + (i // 2) * 16
             self.screen.blit(self.font_bold.render(k, True, ACC), (hx, hy))
@@ -1414,6 +1503,28 @@ class Game:
             box.fill((224, 83, 61, 235))
             box.blit(msg, (12, 7))
             self.screen.blit(box, (MAP_W // 2 - box.get_width() // 2, 12))
+
+    def draw_opt_panel(self):
+        """Kotak kiri-bawah peta berisi hasil Local Search (P) / CSP (C); tutup dengan X."""
+        info = self.last_search_info
+        if not info or self.in_combat:
+            return
+        colors = {"txt": (235, 244, 230), "dim": (150, 168, 145), "acc": (255, 220, 110),
+                "good": (130, 230, 150), "bad": (255, 140, 110)}
+        pad, lh, w = 12, 17, 430
+        h = pad * 2 + 24 + lh * len(info["lines"]) + 16
+        x, y = 12, SCREEN_H - h - 12
+        box = pygame.Surface((w, h), pygame.SRCALPHA)
+        box.fill((22, 34, 26, 238))
+        self.screen.blit(box, (x, y))
+        pygame.draw.rect(self.screen, (44, 61, 47), (x, y, w, h), 2)
+        cx, cy = x + pad, y + pad
+        self.screen.blit(self.font_bold.render(info["title"], True, colors["acc"]), (cx, cy))
+        cy += 24
+        for text, ck in info["lines"]:
+            self.screen.blit(self.font_small.render(text, True, colors[ck]), (cx, cy))
+            cy += lh
+        self.screen.blit(self.font_tiny.render("X: tutup panel", True, colors["dim"]), (cx, cy + 2))
 
     def draw_combat_overlay(self):
         """Modal pertarungan giliran: HP bar kedua pihak, log aksi terakhir, dan
@@ -1481,6 +1592,7 @@ class Game:
         self.draw_debug_overlay()
         self.draw_debug_tooltip()
         self.draw_hud()
+        self.draw_opt_panel()
         self.draw_combat_overlay()
         pygame.display.flip()
 
@@ -1530,6 +1642,12 @@ class Game:
             self.show_toast("Mode GILIRAN aktif" if self.turn_based else "Mode REAL-TIME aktif")
         elif key == pygame.K_o:
             self.toggle_auto_mode()
+        elif key == pygame.K_p:
+            self.run_local_search()
+        elif key == pygame.K_c:
+            self.run_csp()
+        elif key == pygame.K_x:
+            self.last_search_info = None
         elif key == pygame.K_f:
             self.toggle_fullscreen()
         elif key == pygame.K_SPACE:

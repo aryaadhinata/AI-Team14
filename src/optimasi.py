@@ -41,7 +41,7 @@ CONSTRAINT  : all-different (tiap slot cuma dipakai 1 musuh) — binary
 import math
 import random
 from dataclasses import replace
-import src.pertarungan as combat
+import pertarungan as combat
 
 # ---------------------------------------------------------------------------
 # 1. ROSTER MUSUH — 5 karakter, stat & gaya tarung (eval function) beda-beda

@@ -6,7 +6,7 @@ UPDATE: disesuaikan dengan mekanik probabilitas baru di pertarungan.py —
 apply_action() sekarang balikin (state, event) bukan cuma state, jadi log
 simulate_combat() jadi 5-tuple (who, action, state, dbg, event)."""
 import math, random, time, json
-import src.pertarungan as m
+import pertarungan as m
 
 random.seed(7)
 

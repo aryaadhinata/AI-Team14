@@ -37,8 +37,8 @@ import time
 
 import pygame
 
-import src.pertarungan as combat  # logika pertarungan giliran (minimax/alpha-beta/dll)
-import src.optimasi as optimasi               # banyak musuh: Local Search (Hill Climbing/SA) & CSP (backtracking)
+import pertarungan as combat  # logika pertarungan giliran (minimax/alpha-beta/dll)
+import optimasi as optimasi               # banyak musuh: Local Search (Hill Climbing/SA) & CSP (backtracking)
 
 # ---------------------------------------------------------------------------
 # Konfigurasi dasar

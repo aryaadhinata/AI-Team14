@@ -65,6 +65,8 @@ ENEMY_EVAL_FN = [combat.eval_aggressive, combat.eval_defensive, combat.eval_hp_d
 
 DEFAULT_PLAYER_STATS = combat.Stats(name="Pemain", max_hp=100, atk_min=10, atk_max=25,
                                     hit_base=0.70, hit_cap=0.85)
+LOCK_MARGIN = 0.8
+POST_FIGHT_RECOVERY = 0.5
 
 # ---------------------------------------------------------------------------
 # 2. REWARD — naik rata (flat) tiap menang, berlaku sama utk musuh manapun
@@ -84,6 +86,20 @@ def apply_reward(stats):
                     atk_max=stats.atk_max + REWARD_ATK,
                     hit_base=min(0.95, stats.hit_base + REWARD_HIT_BASE),
                     hit_cap=min(0.98, stats.hit_cap + REWARD_HIT_CAP))
+
+
+def recover_hp(hp_left, new_max_hp, ratio=None):
+    """HP awal duel berikutnya setelah menang. None = HP penuh (ratio >= 1)."""
+    r = POST_FIGHT_RECOVERY if ratio is None else ratio
+    if r >= 1.0:
+        return None
+    return min(new_max_hp, int(round(hp_left + r * (new_max_hp - hp_left))))
+
+
+def is_locked(player_stats, enemy_stats, margin=None):
+    """True kalau pemain BELUM boleh melawan musuh ini (syarat CSP: kekuatan minimum)."""
+    m = LOCK_MARGIN if margin is None else margin
+    return power(player_stats) < power(enemy_stats) * m
 
 
 def power(stats):
@@ -107,9 +123,7 @@ def predict_duel(player_stats, enemy_stats, player_hp=None, max_rounds=40):
     Return (hp_pemain_sisa, hp_musuh_sisa, jumlah_ronde)."""
     php = player_hp if player_hp is not None else player_stats.max_hp
     ehp = enemy_stats.max_hp
-    old_p, old_n = combat.PLAYER_STATS_OVERRIDE, combat.NPC_STATS_OVERRIDE
-    combat.PLAYER_STATS_OVERRIDE, combat.NPC_STATS_OVERRIDE = player_stats, enemy_stats
-    try:
+    with combat.stat_overrides(player_stats, enemy_stats):
         for r in range(max_rounds):
             php -= combat.attack_hit_chance(ehp, "npc") * combat.expected_attack_damage("npc")
             if php <= 0:
@@ -118,29 +132,34 @@ def predict_duel(player_stats, enemy_stats, player_hp=None, max_rounds=40):
             if ehp <= 0:
                 return php, 0.0, r + 1
         return php, ehp, max_rounds
-    finally:
-        combat.PLAYER_STATS_OVERRIDE, combat.NPC_STATS_OVERRIDE = old_p, old_n
 
 
-def evaluate_order(order, player_base_stats, enemies):
-    """Simulasikan SELURUH rangkaian pertarungan sesuai `order` (reward
-    diterapkan tiap menang; pemain MULAI SETIAP DUEL dengan HP penuh —
-    'istirahat' setelah menang, representasi jeda antar pertarungan).
-    Return total biaya (HP hilang + penalti kalau diprediksi kalah) ->
-    Local Search MEMINIMALKAN nilai ini. Karena HP selalu penuh di awal
-    duel, biaya tiap duel murni mencerminkan SEBERAPA SIAP stat pemain
-    saat itu — di sinilah urutan (lawan mudah dulu vs susah dulu) benar2
-    berpengaruh ke hasil akhir."""
-    stats, cost = player_base_stats, 0.0
+def evaluate_order_detail(order, player_base_stats, enemies, recovery=None):
+    """Simulasikan SELURUH rangkaian duel sesuai `order`. Return (biaya, jumlah_menang).
+    - menang : reward stat diterapkan; HP pulih sebagian (POST_FIGHT_RECOVERY, 1.0 = penuh)
+    - kalah  : penalti 500 + HP musuh, stat TIDAK naik, pemain mundur & pulih penuh
+    - biaya  : HP yang terkuras tiap duel yang dimenangkan + penalti tiap duel yang diprediksi kalah
+    CATATAN: prediksi memakai predict_duel (semua pihak selalu Attack) -> PESIMIS; duel
+    sungguhan bisa dimenangkan dgn Heal/Parry. Karena itu 'jumlah_menang' ikut ditampilkan."""
+    ratio = POST_FIGHT_RECOVERY if recovery is None else recovery
+    stats, hp, cost, wins = player_base_stats, player_base_stats.max_hp, 0.0, 0
     for idx in order:
         enemy = enemies[idx]
-        hp_after, ehp_after, rounds = predict_duel(stats, enemy, player_hp=stats.max_hp)
+        hp_after, _, _ = predict_duel(stats, enemy, player_hp=hp)
         if hp_after <= 0:
-            cost += 500 + enemy.max_hp       # penalti besar: diprediksi kalah, stat TIDAK naik
+            cost += 500 + enemy.max_hp
+            hp = stats.max_hp
             continue
-        cost += (stats.max_hp - hp_after)    # biaya = HP yang terkuras buat menang duel ini
+        cost += hp - hp_after
+        wins += 1
         stats = apply_reward(stats)
-    return cost
+        hp = hp_after + ratio * (stats.max_hp - hp_after)
+    return cost, wins
+
+
+def evaluate_order(order, player_base_stats, enemies, recovery=None):
+    """Fungsi objektif Local Search (MINIMISASI) = biaya dari evaluate_order_detail."""
+    return evaluate_order_detail(order, player_base_stats, enemies, recovery)[0]
 
 
 def hill_climbing(enemies, player_base_stats, restarts=8, seed=None):
@@ -211,7 +230,7 @@ def simulated_annealing(enemies, player_base_stats, iterations=400, t0=60.0, coo
 # 4. CSP — Backtracking + MRV + LCV + AC-3
 # ---------------------------------------------------------------------------
 
-def required_power(enemy_stats, margin=0.8):
+def required_power(enemy_stats, margin=LOCK_MARGIN):
     """Syarat kekuatan pemain minimum sebelum 'boleh' lawan musuh ini —
     margin<1 berarti pemain tidak perlu LEBIH kuat, cukup cukup dekat
     (karena tarungnya masih ada faktor taktik/RNG, bukan cuma angka)."""
@@ -230,7 +249,7 @@ def slot_power_table(player_base_stats, n):
     return table
 
 
-def initial_domains(enemies, player_base_stats, margin=0.8):
+def initial_domains(enemies, player_base_stats, margin=LOCK_MARGIN):
     n = len(enemies)
     sp = slot_power_table(player_base_stats, n)
     return {e: set(k for k in range(1, n + 1) if sp[k] >= required_power(stats, margin))
@@ -280,7 +299,7 @@ def order_domain_lcv(var, domains, assignment, variables):
     return sorted(domains[var], key=conflicts)
 
 
-def backtracking_search(enemies, player_base_stats, margin=0.8):
+def backtracking_search(enemies, player_base_stats, margin=LOCK_MARGIN):
     """Return (order | None, stats_log). order=None berarti CSP TIDAK
     PUNYA SOLUSI (tidak ada urutan yang memenuhi syarat stat minimum)."""
     n = len(enemies)

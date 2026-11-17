@@ -8,7 +8,7 @@ di game.py). NPC memilih aksinya lewat pencarian pohon permainan 2-pemain
 opsional), BUKAN aturan tetap (if/else) — supaya bisa dibandingkan.
 
 ======================================================================
-DEFINISI FORMAL (ringkas — versi lengkap + hasil eksperimen ada di LAPORAN.md)
+DEFINISI FORMAL (ringkas — versi lengkap + hasil eksperimen ada di report/LAPORAN_PERTARUNGAN.md)
 ======================================================================
 STATE     s = (player_hp, npc_hp, turn, to_move, player_last, npc_last)
             player_hp, npc_hp  : nyawa kedua pihak, 0..100
@@ -43,6 +43,7 @@ EVALUATION FUNCTION  Eval(s) — dipakai saat depth cutoff TERCAPAI sebelum s
 import math
 import random
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import Enum
 
@@ -133,6 +134,19 @@ class Stats:
 
 PLAYER_STATS_OVERRIDE = None   # Stats | None — di-set game.py sebelum start_combat()
 NPC_STATS_OVERRIDE = None      # Stats | None — profil musuh yang sedang dilawan
+
+
+@contextmanager
+def stat_overrides(player=None, npc=None):
+    """Pasang PLAYER/NPC_STATS_OVERRIDE sementara; nilai lama SELALU dipulihkan
+    (juga kalau terjadi error) -> prediksi/eksperimen tidak bisa meninggalkan stat nyasar."""
+    global PLAYER_STATS_OVERRIDE, NPC_STATS_OVERRIDE
+    old = (PLAYER_STATS_OVERRIDE, NPC_STATS_OVERRIDE)
+    PLAYER_STATS_OVERRIDE, NPC_STATS_OVERRIDE = player, npc
+    try:
+        yield
+    finally:
+        PLAYER_STATS_OVERRIDE, NPC_STATS_OVERRIDE = old
 
 
 def _stats_for(side):

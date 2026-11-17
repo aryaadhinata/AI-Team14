@@ -1,105 +1,149 @@
 # Laporan: Banyak Musuh — Local Search & CSP
-
-Modul: `optimasi.py`. 5 musuh beda "karakter" (stat berbeda) spawn sekaligus
-di peta (`game.py`, lihat `spawn_enemies()`). Pemain harus mengalahkan
-mereka — menang = reward (semua stat naik). Dua pendekatan AI buat **memilih
-urutan** menghadapi mereka:
-
-- **Local Search & Optimization** — cari urutan **TERBAIK** (hemat HP paling
-  banyak sepanjang rangkaian). Dipakai Mode Otomatis (tombol **O**).
-- **CSP** — cari urutan yang **SAH** (bukan optimal, cukup memenuhi syarat
-  "stat pemain minimum sebelum boleh lawan musuh itu").
-
+ 
+Modul: `src/optimasi.py`. 5 musuh beda "karakter" (stat berbeda) spawn sekaligus di peta
+(`game.py`, `spawn_enemies()`). Pemain mengalahkan mereka; menang = reward (semua stat naik).
+Dua pendekatan AI dipakai untuk **urutan** menghadapi mereka:
+ 
+- **Local Search & Optimization** — mencari urutan **TERBAIK** (biaya terendah). Hasilnya
+  ditampilkan lewat tombol **P**, dibanding greedy dan brute-force.
+- **CSP** — mencari urutan yang **SAH** (syarat "stat pemain minimum sebelum boleh melawan musuh").
+  Syarat yang sama dipakai game untuk **mengunci** musuh (§3.3).
 ## 1. Roster & Reward
-
-| Musuh | Max HP | Damage | Peluang kena |
-|---|---|---|---|
-| Pemburu Liar | 60 | 8–18 | 65%–80% |
-| Penjaga Hutan | 90 | 10–22 | 68%–82% |
-| Pendekar Bayangan | 115 | 12–26 | 70%–85% |
-| Ksatria Besi | 140 | 14–28 | 72%–86% |
-| Naga Kecil | 170 | 16–32 | 75%–88% |
-
-Reward tiap menang (flat, sama utk musuh manapun): `+8 max_hp, +2 atk_min/atk_max,
-+0.02 hit_base, +0.01 hit_cap`. Pemain **pulih penuh** (full HP) sebelum tiap
-duel baru dimulai — representasi "istirahat" antar pertarungan. Ini penting:
-tanpa ini, HP tersisa dari duel sebelumnya akan mendominasi hasil dan urutan
-jadi tidak terlalu berpengaruh (sudah saya coba & buktikan sendiri saat
-mengembangkan — lihat catatan desain di kode).
-
+ 
+| Musuh | Max HP | Damage | Peluang kena | Depth | Mistake | Gaya (eval) | Power |
+|---|---|---|---|---|---|---|---|
+| Pemburu Liar | 60 | 12–27 | 60%–74% | 2 | 0.35 | aggressive | 190.6 |
+| Penjaga Hutan | 85 | 13–29 | 62%–76% | 2 | 0.25 | defensive | 229.9 |
+| Pendekar Bayangan | 110 | 15–32 | 64%–78% | 3 | 0.18 | hp_diff | 276.9 |
+| Ksatria Besi | 135 | 14–32 | 66%–80% | 3 | 0.10 | stance_aware | 302.9 |
+| Naga Kecil | 160 | 16–35 | 68%–82% | 4 | 0.04 | aggressive | 351.2 |
+ 
+Pemain awal: 100 HP, damage 10–25, peluang kena 70%–85% (power 235.6). Rumus
+`power = max_hp + rata2_damage × rata2_peluang_kena × 10`.
+ 
+Reward tiap menang (flat): `+8 max_hp, +2 atk_min/atk_max, +0.02 hit_base, +0.01 hit_cap`.
+ 
+**Pemulihan HP antar duel** diatur `POST_FIGHT_RECOVERY` (`optimasi.py`): bagian HP yang hilang
+yang dipulihkan setelah menang. Default **1.0** = HP pulih penuh (urutan hanya soal kesiapan stat).
+Nilai < 1 membawa sisa HP ke duel berikutnya; lihat §2.3 untuk dampaknya.
+ 
 ## 2. Local Search & Optimization
-
-**Ruang pencarian**: satu permutasi urutan ke-5 musuh.
-**Neighbor**: tukar (swap) posisi 2 musuh.
-**Objective (minimisasi)**: `evaluate_order()` = total HP yang terkuras
-sepanjang seluruh rangkaian duel, diprediksi deterministik lewat
-`predict_duel()` (nilai-harapan, bukan RNG — supaya bisa dievaluasi ribuan
-kali dengan cepat tanpa simulasi acak berulang).
-
-**Algoritma**: Hill Climbing (steepest-ascent per sweep + random restart) dan
-Simulated Annealing (pembanding, bisa terima solusi lebih buruk dgn peluang
-`exp(-Δ/T)`, T menurun tiap iterasi).
-
-### Hasil nyata (seed=3)
-
-| Algoritma | Cost | Waktu | Urutan ditemukan |
-|---|---|---|---|
-| Hill Climbing (12 restart) | **1021.0** | 57.0 ms | Pemburu→Penjaga→Pendekar→Naga→Ksatria |
-| Simulated Annealing (400 iter) | **1021.0** | 81.7 ms | Pemburu→Penjaga→Naga→Pendekar→Ksatria |
-| **Brute-force (semua 120 permutasi)** | **1021.0** | — | (sama, cost minimum) |
-
-**Kedua local search menemukan hasil yang terbukti OPTIMAL** (diverifikasi lewat
-brute-force atas seluruh 5!=120 kemungkinan urutan — langka bisa diverifikasi
-selengkap ini, N=5 cukup kecil utk brute-force).
-
-Sebagai perbandingan, 1 dari 12 restart Hill Climbing (tanpa random-restart)
-akan **kejebak local optimum** (cost lebih tinggi dari 1021) — bukti nyata
-kenapa random-restart penting. Urutan "mudah→susah" (cost 1021) hampir **2×
-lebih hemat** dibanding urutan "susah→mudah" (cost ≈2048, dicoba manual) —
-konfirmasi bahwa strategi intuitif (kalahkan yang lemah dulu biar stat naik
-sebelum hadapi yang kuat) memang terbukti optimal di sini, bukan cuma dugaan.
-
-## 3. CSP — Backtracking + MRV + LCV + AC-3
-
-**Variables**: 5 musuh. **Domain(musuh)**: slot urutan {1..5} yang kekuatan
-pemain di slot itu (`slot_power_table`, dihitung dari reward kumulatif —
-sama utk semua urutan krn reward flat) cukup (`required_power = power(musuh) × margin`).
-**Constraint**: all-different (tiap slot cuma 1 musuh) — binary antar SETIAP
-pasang variabel, diselesaikan AC-3.
-
-### Hasil nyata: feasible vs infeasible per margin
-
-| Margin | Hasil | Node dikunjungi | Backtrack | Revisi AC-3 |
+ 
+**Ruang pencarian**: permutasi urutan ke-5 musuh. **Neighbor**: tukar 2 posisi.
+**Objective (minimisasi)**: `evaluate_order()` — simulasi rangkaian duel secara deterministik lewat
+`predict_duel()` (nilai-harapan, kedua pihak selalu Attack):
+- duel **dimenangkan** → biaya += HP yang terkuras; stat naik (reward); HP pulih sesuai `POST_FIGHT_RECOVERY`;
+- duel **diprediksi kalah** → biaya += **500 + HP musuh** (penalti); stat tidak naik; pemain pulih penuh.
+**Algoritma**: Hill Climbing (steepest-ascent per sweep + random restart) dan Simulated Annealing
+(menerima solusi lebih buruk dengan peluang `exp(-Δ/T)`).
+ 
+### 2.1 Hasil nyata (seed=3, `POST_FIGHT_RECOVERY=1.0`)
+ 
+| Algoritma | Biaya | Menang (prediksi) | Waktu* | Urutan ditemukan |
 |---|---|---|---|---|
-| 0.5 (longgar) | Solusi ditemukan | 6 | 0 | 0 |
-| 0.8 (default) | Solusi ditemukan | 6 | 0 | 0 |
+| Hill Climbing (12 restart) | **1039.8** | 4/5 | ±65 ms | Pemburu→Penjaga→Pendekar→Naga→Ksatria |
+| Simulated Annealing (400 iter) | **1039.8** | 4/5 | ±90 ms | Pemburu→Penjaga→Naga→Pendekar→Ksatria |
+| Brute-force (120 permutasi) | **1039.8** | 4/5 | ±25 ms | Pemburu→Penjaga→Pendekar→Ksatria→Naga |
+| Greedy (`power` terkecil dulu) | **1039.8** | 4/5 | — | Pemburu→Penjaga→Pendekar→Ksatria→Naga |
+ 
+\*Waktu bergantung mesin. Beberapa urutan berbeda punya biaya sama, jadi urutan yang dikembalikan tiap
+algoritma boleh berbeda; biayanya tetap optimal. Satu dari 12 restart Hill Climbing berhenti di local
+optimum (biaya 1553.9) — bukti kenapa random-restart penting. Urutan "sulit→mudah" berbiaya **2060.5**
+(±2× lebih boros).
+ 
+### 2.2 Cara membaca "biaya 1039.8" (penting)
+ 
+Rincian untuk urutan Pemburu→Penjaga→Pendekar→Ksatria→Naga:
+ 
+| Duel | HP maks pemain | Prediksi | Biaya |
+|---|---|---|---|
+| Pemburu Liar | 100 | menang, sisa 32.6 | 67.4 |
+| Penjaga Hutan | 108 | menang, sisa 20.9 | 87.1 |
+| Pendekar Bayangan | 116 | menang, sisa 11.6 | 104.4 |
+| Ksatria Besi | 124 | menang, sisa 3.1 | 120.9 |
+| Naga Kecil | 132 | **kalah** (penalti 500+160) | 660.0 |
+| **Total** | | 4 menang, 1 kalah | **1039.8** |
+ 
+Sekitar **63% biaya adalah penalti** untuk satu duel yang diprediksi kalah. Prediksi memakai kebijakan
+"selalu Attack" sehingga **pesimis**: pemain sungguhan bisa memakai Heal/Parry. Karena itu panel P
+menampilkan juga jumlah duel yang diprediksi menang, dan angka biaya dipakai untuk *membandingkan
+urutan*, bukan sebagai jumlah HP sebenarnya.
+ 
+### 2.3 Apakah urutan benar-benar berpengaruh? (`POST_FIGHT_RECOVERY`)
+ 
+| Pemulihan | Biaya terbaik (menang) | Contoh urutan terbaik | Biaya greedy (menang) | Greedy optimal? |
+|---|---|---|---|---|
+| 1.0 (penuh) | 1039.8 (4) | Pemburu→Penjaga→Pendekar→Ksatria→Naga | 1039.8 (4) | **Ya** |
+| 0.75 | 1541.9 (3) | Pemburu→Penjaga→Ksatria→Pendekar→Naga | 2047.5 (2) | Tidak |
+| 0.5 | 1545.5 (3) | Penjaga→Pemburu→Ksatria→Pendekar→Naga | 2557.4 (1) | Tidak |
+| 0.25 | 1553.9 (3) | Pemburu→Ksatria→Penjaga→Naga→Pendekar | 2557.4 (1) | Tidak |
+ 
+Dengan HP pulih penuh, greedy sudah optimal sehingga Hill Climbing/SA tidak menemukan apa pun yang
+greedy tidak temukan (ruang pencariannya juga hanya 120 permutasi, jadi brute-force cukup). Begitu
+HP terbawa antar duel, **greedy tidak lagi optimal** dan Local Search menjadi bermakna. Default tetap
+1.0 karena dampaknya ke kesulitan game belum diuji dengan pemain sungguhan (prediksi pesimis; pada 0.5
+hanya 3 dari 5 musuh yang diprediksi bisa dikalahkan).
+ 
+## 3. CSP — Backtracking + MRV + LCV + AC-3
+ 
+**Variables**: 5 musuh. **Domain(musuh)**: slot {1..5} yang kekuatan pemain di slot itu
+(`slot_power_table`, dari reward kumulatif) ≥ `required_power = power(musuh) × margin`.
+**Constraint**: all-different, diselesaikan AC-3.
+ 
+### 3.1 Hasil nyata per margin
+ 
+| Margin | Hasil | Node | Backtrack | Revisi AC-3 |
+|---|---|---|---|---|
+| 0.5 | Solusi ditemukan | 6 | 0 | 0 |
+| 0.8 (default game) | Solusi ditemukan | 6 | 0 | 0 |
 | 1.0 | **Tidak ada solusi** | 0 | 0 | 0 |
-| 1.3 | **Tidak ada solusi** | 0 | 0 | **2** |
-| 1.6 | **Tidak ada solusi** | 0 | 0 | 1 |
-
-**Kesimpulan menarik**: di margin 1.0+, soal ini sudah **tidak feasible SEJAK
-AWAL** — AC-3/filter domain awal langsung mendeteksinya SEBELUM backtracking
-sempat jalan satu node pun (`nodes=0`). Ini pas sekali menunjukkan nilai AC-3:
-memangkas ruang pencarian di depan, bukan menunggu backtracking gagal berulang
-kali buat ketahuan tidak ada solusi.
-
-Catatan: CSP (margin 0.8) menemukan urutan **Pemburu→Ksatria→Penjaga→Naga→Pendekar**
-— SAH (semua syarat stat minimum terpenuhi) tapi **BUKAN** urutan optimal
-Local Search (1021). Ini memang disengaja/sesuai definisi masing-masing:
-CSP cuma menjamin *kelayakan*, bukan *keoptimalan* — Local Search itulah yang
-mengejar hasil terbaik.
-
+| 1.3 | **Tidak ada solusi** | 0 | 0 | 0 |
+| 1.6 | **Tidak ada solusi** | 0 | 0 | 0 |
+ 
+Pada margin ≥ 1.0 soal sudah tidak feasible sejak awal: filter domain awal membuat domain satu musuh
+kosong, sehingga ditolak **sebelum backtracking menjalankan satu node pun** (`nodes=0`).
+ 
+### 3.2 SAH bukan berarti optimal
+ 
+Margin 0.8 menghasilkan urutan **Pemburu→Ksatria→Naga→Penjaga→Pendekar** dengan biaya **1553.9**
+(menang 3/5), lebih boros dari optimum 1039.8. CSP hanya menjamin *kelayakan*; Local Search yang
+mengejar *kualitas*.
+ 
+### 3.3 CSP dipakai di gameplay (kunci musuh)
+ 
+`optimasi.LOCK_MARGIN = 0.8`: musuh **terkunci** selama `power(pemain) < 0.8 × power(musuh)`.
+ 
+| Kondisi pemain | Power | Musuh terkunci |
+|---|---|---|
+| Awal | 235.6 | Ksatria Besi (butuh 242.3), Naga Kecil (butuh 281.0) |
+| Setelah 1 menang | 262.1 | Naga Kecil |
+| Setelah 2 menang | 289.1 | — |
+ 
+Musuh terkunci: diam (tidak mengejar), tidak dipilih Mode Otomatis, dan kontak dengannya tidak memulai
+duel (muncul pesan "TERKUNCI"); label di peta diberi `[terkunci]`. Tombol **C** memakai margin
+`LOCK_MARGIN` pada tekanan pertama.
+ 
 ## 4. Integrasi ke Game
-
-- Musuh digambar sbg lingkaran berwarna + nama (`_draw_enemy_marker_unit`), beda
-  warna tiap karakter.
-- Jalan ke petak musuh (manual atau Mode Otomatis) memicu pertarungan lewat
-  `start_multi_combat()` — pakai mesin pertarungan yg SAMA persis (minimax/
-  alpha-beta/dst, debug overlay, delay giliran) dgn stat musuh itu di-override
-  sementara (`combat.PLAYER_STATS_OVERRIDE` / `NPC_STATS_OVERRIDE`).
-- Menang: musuh hilang dari peta, stat pemain naik (reward). Kalah/seri:
-  pemain mundur ke titik spawn (supaya tidak ke-trigger ulang terus-menerus).
-- **Mode Otomatis** (tombol **O**): hitung urutan via Hill Climbing atas musuh
-  yang masih hidup, lalu pemain auto-jalan (pakai A*/UCS yang SAMA dgn sistem
-  kejar-kejaran) ke musuh berikutnya sesuai urutan itu, bertarung otomatis,
-  lanjut ke musuh berikutnya. Menekan WASD kapan saja membatalkan mode ini.
+ 
+- Kontak dengan musuh yang tidak terkunci memicu duel lewat `start_multi_combat()` dengan mesin
+  pertarungan yang sama (minimax/alpha-beta/dst), stat musuh dipasang sementara lewat
+  `combat.PLAYER_STATS_OVERRIDE`/`NPC_STATS_OVERRIDE`.
+- Menang: musuh hilang, stat naik, HP awal duel berikutnya dihitung `recover_hp()` (penuh bila
+  `POST_FIGHT_RECOVERY=1.0`). Kalah/seri: pemain mundur ke spawn dengan HP penuh dan musuh itu
+  dipindah ke posisi acak baru.
+- **Mode Otomatis (O)**: pemain berjalan (A*/UCS) ke musuh **tidak terkunci** dengan `power` terkecil,
+  dihitung ulang tiap langkah dan setelah tiap kemenangan (greedy). **Rem**: bila duel melawan musuh
+  termudah itu diprediksi KALAH (`predict_duel`), mode berhenti dan menampilkan pesan; menekan **O**
+  lagi melanjutkan dengan menyerang. Menekan WASD membatalkan mode ini.
+- **Tombol P**: Hill Climbing, SA, brute-force, dan greedy pada musuh yang masih hidup, lengkap dengan
+  biaya, jumlah menang, dan waktu. **Tombol C**: CSP dengan margin berganti tiap tekan. **X** menutup panel.
+- `predict_duel()` memasang stat lewat `combat.stat_overrides(...)` (context manager) sehingga stat lama
+  selalu dipulihkan walau terjadi error.
+## 5. Pengujian
+ 
+`python -m unittest discover -s tests -v` (12 tes): Alpha-Beta bernilai sama dengan Minimax; biaya
+greedy default 1039.8 (regresi); Hill Climbing menghasilkan local optimum; Hill Climbing/SA tidak
+pernah lebih baik dari brute-force; solusi CSP memenuhi syarat stat dan all-different; margin 1.3 tidak
+punya solusi dengan `nodes=0`; kunci musuh terbuka setelah menang; `predict_duel`/`stat_overrides` tidak
+meninggalkan stat nyasar; pada pemulihan 0.75 greedy tidak lagi optimal.
+ 

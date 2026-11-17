@@ -38,7 +38,7 @@ import time
 import pygame
 
 import pertarungan as combat  # logika pertarungan giliran (minimax/alpha-beta/dll)
-import optimasi as optimasi               # banyak musuh: Local Search (Hill Climbing/SA) & CSP (backtracking)
+import optimasi                  # banyak musuh: Local Search (Hill Climbing/SA) & CSP (backtracking)
 
 # ---------------------------------------------------------------------------
 # Konfigurasi dasar
@@ -79,7 +79,7 @@ SS = 2  # faktor supersampling untuk gambar karakter (dirender besar lalu diperk
 PLAYER_STEP_MS = 130         # kecepatan jalan normal pemain (tahan tombol)
 COMBAT_TURN_DELAY = 0.8      # jeda (detik) sebelum giliran NPC di pertarungan dieksekusi
 AUTO_STEP_MS = 160           # kecepatan jalan pemain saat Mode Otomatis (ms per petak)
-CSP_MARGINS = (0.5, 0.8, 1.0, 1.3)   # margin syarat stat CSP yang dicoba bergantian (tombol C)
+CSP_MARGINS = (optimasi.LOCK_MARGIN, 0.5, 1.0, 1.3)   # margin CSP yang dicoba bergantian (tombol C); pertama = margin KUNCI di game
 ENEMY_STEP_MS = 260          # kecepatan jalan musuh roster saat mengejar pemain (ms per petak)
 ENEMY_RING_BASE, ENEMY_RING_STEP, ENEMY_RING_TOL = 6, 3, 0   # musuh ke-i di jarak (langkah) BASE + i*STEP dari spawn pemain, toleransi +-TOL -> urutan tiba = urutan kesulitan
 ENEMY_MIN_DIST_FROM_PLAYER = 7   # jarak minimum spawn musuh roster ke titik spawn pemain (petak)
@@ -580,6 +580,8 @@ class Game:
         self.auto_timer = 0.0
         self.last_search_info = None # hasil Local Search/CSP terakhir -> panel (draw_opt_panel), tombol P / C
         self.csp_margin_idx = 0      # tombol C: tiap tekan memakai margin berikutnya dari CSP_MARGINS
+        self.carry_hp = None         # HP awal duel berikutnya (None = penuh); lihat optimasi.POST_FIGHT_RECOVERY
+        self.auto_force = False      # True = rem prediksi-kalah Mode Otomatis dilewati (tekan O lagi)
         
         # arah hadap & animasi
         self.player_facing = "front"
@@ -607,6 +609,7 @@ class Game:
         self.auto_mode = False
         self.auto_path = None
         self.last_search_info = None   # hasil lama tidak berlaku utk peta baru
+        self.carry_hp, self.auto_force = None, False
 
     def spawn_enemies(self):
         """Sebar ENEMY_ROSTER (optimasi.py) di petak yang bisa dilewati — minimal
@@ -657,11 +660,20 @@ class Game:
     def alive_enemies(self):
         return [e for e in self.enemies if e["alive"]]
 
+    def is_locked(self, idx):
+        """CSP di gameplay: musuh TERKUNCI selama kekuatan pemain < LOCK_MARGIN x kekuatan musuh
+        (syarat yang sama dgn domain CSP di optimasi.py). Menang -> stat naik -> kunci terbuka.
+        Musuh terkunci tidak mengejar, tidak dipilih Mode Otomatis, dan tidak memulai duel."""
+        return optimasi.is_locked(self.player_stats, optimasi.ENEMY_ROSTER[idx])
+
     def check_enemy_contact(self):
         if self.in_combat:
             return
         for e in self.enemies:
             if e["alive"] and e["pos"] == self.player:
+                if self.is_locked(e["idx"]):
+                    self.show_toast(f"{optimasi.ENEMY_ROSTER[e['idx']].name} TERKUNCI — stat belum cukup (syarat CSP)", duration=1.5)
+                    continue
                 self.start_multi_combat(e["idx"])
                 return
 
@@ -672,7 +684,7 @@ class Game:
         self.combat_enemy_idx = enemy_idx
         self.in_combat = True
         self._multi_eval_fn = optimasi.ENEMY_EVAL_FN[enemy_idx]   # gaya tarung musuh ini, TIDAK menimpa self.combat_eval
-        self.combat = combat.new_combat(npc_starts=False)   # pemain menyerang duluan (kontak terjadi karena pemain/musuh bertemu)
+        self.combat = combat.new_combat(player_hp=self.carry_hp, npc_starts=False)   # pemain menyerang duluan (kontak terjadi karena pemain/musuh bertemu)
         self.combat_log = [f"{enemy_stats.name} menghadang — pertarungan dimulai!"]
         self.combat_debug = None
         self.combat_pending_action = None
@@ -800,6 +812,8 @@ class Game:
                     f"Peluang kena +{(after.hit_base - before.hit_base)*100:.0f}%/+{(after.hit_cap - before.hit_cap)*100:.0f}%",
                     duration=5.0)
                 self.auto_path = None  # paksa hitung ulang rute/urutan Local Search
+                self.carry_hp = optimasi.recover_hp(self.combat.player_hp, after.max_hp)   # None = HP penuh
+                self.auto_force = False
             else:  # pemain kalah ATAU seri -> mundur dulu, kalau tidak bisa
                     # langsung ke-trigger lagi tiap frame krn masih nempel di sel musuh
                 self.show_toast(f"Kalah lawan {enemy_name}. Coba lagi nanti." if w is True
@@ -809,6 +823,7 @@ class Game:
                 enemy["pos"] = self._random_enemy_position(exclude_enemy=enemy, ring_idx=enemy["idx"])
                 enemy["path"] = None
                 self.auto_path = None
+                self.carry_hp = None   # kalah/seri -> mundur ke spawn & pulih penuh
             combat.PLAYER_STATS_OVERRIDE = None
             combat.NPC_STATS_OVERRIDE = None
             self.combat_enemy_idx = None
@@ -818,16 +833,22 @@ class Game:
         return True
 
     def toggle_auto_mode(self):
-        self.auto_mode = not self.auto_mode
-        self.auto_path = None
         if not self.auto_mode:
-            self.show_toast("Mode Otomatis dimatikan")
+            self.auto_mode = True
+            self.auto_force = False
+            self.auto_path = None
+            if not self.alive_enemies():
+                self.auto_mode = False
+                self.show_toast("Semua musuh sudah dikalahkan!")
+                return
+            self.show_toast("Mode Otomatis AKTIF — mengejar musuh termudah dulu")
             return
-        if not self.alive_enemies():
-            self.auto_mode = False
-            self.show_toast("Semua musuh sudah dikalahkan!")
-            return
-        self.show_toast("Mode Otomatis AKTIF — mengejar musuh termudah dulu")
+        self.auto_force = not self.auto_force
+        self.auto_path = None
+        if self.auto_force:
+            self.show_toast("Mode Otomatis: lewati musuh yang diprediksi kalah")
+        else:
+            self.show_toast("Mode Otomatis: kembali ke target termudah yang bisa dicoba")
 
     # ---------------- Panel hasil Local Search & CSP (tombol P / C) ----------------
     def _alive_roster(self):
@@ -843,13 +864,15 @@ class Game:
     def run_local_search(self):
         """Tombol P: Hill Climbing & Simulated Annealing mencari urutan lawan terbaik atas
         musuh yang masih hidup, dibandingkan dengan brute-force (optimum pasti) dan urutan
-        greedy yang dipakai Mode Otomatis. Biaya = total HP terkuras sepanjang rangkaian duel."""
+        greedy yang dipakai Mode Otomatis. Biaya = HP terkuras (duel menang) + penalti
+        (500 + HP musuh) tiap duel yang DIPREDIKSI kalah; prediksi mulai dari HP penuh."""
         ids, roster = self._alive_roster()
         if len(roster) < 2:
             self.show_toast("Local Search butuh minimal 2 musuh hidup")
             return
         base, n = self.player_stats, len(roster)
-        cost_of = lambda o: optimasi.evaluate_order(list(o), base, roster)
+        detail = lambda o: optimasi.evaluate_order_detail(list(o), base, roster)
+        cost_of = lambda o: detail(o)[0]
 
         t = time.perf_counter()
         hc_o, hc_c, _ = optimasi.hill_climbing(roster, base, restarts=12, seed=3)
@@ -867,18 +890,20 @@ class Game:
         f = lambda o: self._fmt_order(o, ids)
         col = lambda c: "good" if c <= bf_c + 1e-6 else "bad"
         gap = lambda c: "optimal" if c <= bf_c + 1e-6 else f"+{c - bf_c:.0f} dari optimal"
+        win = lambda o: f"menang {detail(o)[1]}/{n}"
         self.last_search_info = {
             "title": "LOCAL SEARCH · urutan lawan terbaik",
             "lines": [
                 (f"Hill Climbing : {f(hc_o)}", col(hc_c)),
-                (f"   biaya {hc_c:.0f} · {t_hc:.0f} ms · {gap(hc_c)}", "dim"),
+                (f"   biaya {hc_c:.0f} · {win(hc_o)} · {t_hc:.0f} ms · {gap(hc_c)}", "dim"),
                 (f"Sim. Annealing: {f(sa_o)}", col(sa_c)),
-                (f"   biaya {sa_c:.0f} · {t_sa:.0f} ms · {gap(sa_c)}", "dim"),
+                (f"   biaya {sa_c:.0f} · {win(sa_o)} · {t_sa:.0f} ms · {gap(sa_c)}", "dim"),
                 (f"Brute-force   : {f(bf_o)}", "acc"),
-                (f"   biaya {bf_c:.0f} · {t_bf:.0f} ms · optimum pasti ({n}! urutan)", "dim"),
+                (f"   biaya {bf_c:.0f} · {win(bf_o)} · {t_bf:.0f} ms · optimum pasti", "dim"),
                 (f"Greedy (O)    : {f(gr_o)}", col(gr_c)),
-                (f"   biaya {gr_c:.0f} · {gap(gr_c)}", "dim"),
-                ("Angka = nomor musuh. Biaya = total HP terkuras.", "dim"),
+                (f"   biaya {gr_c:.0f} · {win(gr_o)} · {gap(gr_c)}", "dim"),
+                ("Angka = nomor musuh · Biaya = HP hilang + penalti kalah", "dim"),
+                (f"Pemulihan HP antar duel: {optimasi.POST_FIGHT_RECOVERY:.0%} (optimasi.POST_FIGHT_RECOVERY)", "dim"),
             ],
         }
 
@@ -917,9 +942,14 @@ class Game:
         otomatis menyesuaikan begitu stat pemain naik (habis menang) atau ada
         musuh yang mati. optimasi.power() dipakai sbg skor kekuatan musuh;
         makin kecil = makin mudah."""
-        alive = self.alive_enemies()
+        alive = [e for e in self.alive_enemies() if not self.is_locked(e["idx"])]
         if not alive:
             return None
+        if self.auto_force:
+            hp_now = self.carry_hp if self.carry_hp is not None else self.player_stats.max_hp
+            candidates = [e for e in alive if optimasi.predict_duel(self.player_stats, optimasi.ENEMY_ROSTER[e["idx"]], player_hp=hp_now)[0] > 0]
+            if candidates:
+                alive = candidates
         return min(alive, key=lambda e: optimasi.power(optimasi.ENEMY_ROSTER[e["idx"]]))
 
     def _poll_enemy_chase(self, dt):

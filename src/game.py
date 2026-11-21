@@ -23,6 +23,9 @@ Kontrol:
     - P             : Local Search (Hill Climbing + SA) dibanding greedy & brute-force
     - C             : CSP (backtracking + MRV + LCV + AC-3); tekan lagi = ganti margin
     - X             : tutup panel hasil P / C
+    - K             : panel KB sungai (aturan FOL/CNF + hasil ASK)
+    - J             : panel rencana: PDDL vs A* vs MEU (MDP) ke musuh target
+    - U             : ganti planner Mode Otomatis (PDDL -> A* -> MEU)
     - ESC           : keluar
 """
 
@@ -39,6 +42,7 @@ import pygame
 
 import pertarungan as combat  # logika pertarungan giliran (minimax/alpha-beta/dll)
 import optimasi                  # banyak musuh: Local Search (Hill Climbing/SA) & CSP (backtracking)
+import sungai                    # sungai dinamis: KB FOL/CNF (TELL/ASK), planner PDDL, MDP/MEU
 
 # ---------------------------------------------------------------------------
 # Konfigurasi dasar
@@ -47,6 +51,7 @@ ROWS, COLS, CELL = int(16*1.2), int(22*1.2), int(32*1.2)
 
 # Tipe medan
 GRASS, TREE, PROP, BUSH = 0, 1, 2, 3
+ROCK, TIDE, DEEP, WOOD = sungai.ROCK, sungai.TIDE, sungai.DEEP, sungai.WOOD   # tile sungai
 BUSH_COST = 3  # biaya melintasi semak dalam pathfinding (dulunya sungai)
 BUSH_PATCH_COUNT = (4, 6)   # jumlah lingkaran semak per peta (min, maks)
 BUSH_RADIUS = (2.0, 3.0)    # jari-jari tiap lingkaran semak (dalam petak)
@@ -80,6 +85,8 @@ PLAYER_STEP_MS = 130         # kecepatan jalan normal pemain (tahan tombol)
 COMBAT_TURN_DELAY = 0.8      # jeda (detik) sebelum giliran NPC di pertarungan dieksekusi
 AUTO_STEP_MS = 160           # kecepatan jalan pemain saat Mode Otomatis (ms per petak)
 CSP_MARGINS = (optimasi.LOCK_MARGIN, 0.5, 1.0, 1.3)   # margin CSP yang dicoba bergantian (tombol C); pertama = margin KUNCI di game
+RIVER_TICK_MS = 700          # mode real-time: 1 tick waktu sungai (pasang berganti / kayu tenggelam) tiap 700 ms
+PLANNERS = ("PDDL", "A*", "MEU")   # planner rute Mode Otomatis (tombol U)
 ENEMY_STEP_MS = 260          # kecepatan jalan musuh roster saat mengejar pemain (ms per petak)
 ENEMY_RING_BASE, ENEMY_RING_STEP, ENEMY_RING_TOL = 6, 3, 0   # musuh ke-i di jarak (langkah) BASE + i*STEP dari spawn pemain, toleransi +-TOL -> urutan tiba = urutan kesulitan
 ENEMY_MIN_DIST_FROM_PLAYER = 7   # jarak minimum spawn musuh roster ke titik spawn pemain (petak)
@@ -276,8 +283,14 @@ def is_passable(grid, r, c):
     return in_bounds(r, c) and grid[r][c] not in (TREE, PROP)
 
 
+RIVER = None   # sungai.RiverWorld aktif (di-set Game.new_map); None = biaya statis
+
+
 def terrain_cost(grid, r, c):
-    return BUSH_COST if grid[r][c] == BUSH else 1
+    t = grid[r][c]
+    if t in sungai.RIVER_TILES:   # biaya sungai DIAMBIL DARI KB lewat ASK (dinamis: pasang, kayu tenggelam)
+        return RIVER.cost(r, c) if RIVER is not None else sungai.static_cost(t)
+    return BUSH_COST if t == BUSH else 1
 
 
 ORTH = [(1, 0), (-1, 0), (0, 1), (0, -1)]
@@ -507,6 +520,7 @@ def generate_map():
         attempts += 1
         if largest_component_size(g) >= count_passable(g) * 0.85 or attempts >= 20:
             break
+    sungai.carve_river(g)   # sungai vertikal di tengah: jembatan batu, kayu apung, air dalam, area pasang
     passable = [(r, c) for r in range(ROWS) for c in range(COLS) if g[r][c] not in (TREE, PROP)]
     return g, passable
 
@@ -582,6 +596,10 @@ class Game:
         self.csp_margin_idx = 0      # tombol C: tiap tekan memakai margin berikutnya dari CSP_MARGINS
         self.carry_hp = None         # HP awal duel berikutnya (None = penuh); lihat optimasi.POST_FIGHT_RECOVERY
         self.auto_force = False      # True = rem prediksi-kalah Mode Otomatis dilewati (tekan O lagi)
+        self.river = None            # sungai.RiverWorld (KB + waktu + pasang), dibuat di new_map()
+        self.planner = PLANNERS[0]   # planner rute Mode Otomatis: PDDL | A* | MEU (tombol U)
+        self.river_tick = 0.0        # akumulator tick real-time (ms)
+        self._auto_key = self._mdp_key = self._mdp = None
         
         # arah hadap & animasi
         self.player_facing = "front"
@@ -597,7 +615,10 @@ class Game:
 
     # ---------------- Map lifecycle ----------------
     def new_map(self):
+        global RIVER
         self.grid, self.passable = generate_map()
+        self.river = RIVER = sungai.RiverWorld(self.grid, seed=random.randrange(1 << 30))
+        self._auto_key = self._mdp_key = None
         self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
         self.player_step_ms = PLAYER_STEP_MS
         self.player_timer = self.player_step_ms
@@ -631,13 +652,15 @@ class Game:
             dist = bfs_steps(self.grid, nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN))
             target = ENEMY_RING_BASE + ring_idx * ENEMY_RING_STEP
             for tol in range(ENEMY_RING_TOL, ENEMY_RING_TOL + 4):   # longgarkan bertahap kalau peta padat
-                cand = [p for p, d in dist.items() if abs(d - target) <= tol
+                cand = [p for p, d in dist.items() if abs(d - target) <= tol and self._spawnable(p)
                         and all(math.hypot(p[0] - o["pos"][0], p[1] - o["pos"][1]) >= 3 for o in others)]
                 if cand:
                     return random.choice(cand)
         for _ in range(600):
             r, c = random.randint(1, ROWS - 2), random.randint(1, COLS - 2)
             pos = nearest_passable_cell(self.passable, r, c)
+            if not self._spawnable(pos):
+                continue
             if math.hypot(pos[0] - FIXED_PLAYER_SPAWN[0], pos[1] - FIXED_PLAYER_SPAWN[1]) < ENEMY_MIN_DIST_FROM_PLAYER:
                 continue
             if any(math.hypot(pos[0] - o["pos"][0], pos[1] - o["pos"][1]) < 3 for o in others):
@@ -647,7 +670,7 @@ class Game:
         # tapi jarak minimum ke pemain TETAP dijaga
         for _ in range(200):
             pos = nearest_passable_cell(self.passable, random.randint(1, ROWS - 2), random.randint(1, COLS - 2))
-            if math.hypot(pos[0] - FIXED_PLAYER_SPAWN[0], pos[1] - FIXED_PLAYER_SPAWN[1]) >= ENEMY_MIN_DIST_FROM_PLAYER:
+            if math.hypot(pos[0] - FIXED_PLAYER_SPAWN[0], pos[1] - FIXED_PLAYER_SPAWN[1]) >= ENEMY_MIN_DIST_FROM_PLAYER and self._spawnable(pos):
                 return pos
         return nearest_passable_cell(self.passable, random.randint(1, ROWS - 2), random.randint(1, COLS - 2))
 
@@ -711,6 +734,259 @@ class Game:
         self.player_timer = self.player_step_ms
 
     # ---------------- Search / stats ----------------
+    # ---------------- Sungai dinamis (sungai.py): waktu, KB, planner PDDL, MDP/MEU ----------------
+    def _spawnable(self, pos):
+        """Musuh tidak boleh lahir di tile sungai (kayu akan langsung tenggelam / air dalam)."""
+        return self.grid[pos[0]][pos[1]] not in sungai.RIVER_TILES
+
+    def advance_river_time(self):
+        """Satu tick waktu sungai (giliran / timer real-time): pasang berganti & kayu tenggelam.
+        Perubahan biaya = REPLANNING TRIGGER (lihat _on_cost_update)."""
+        if self.river is None or not self.river.has_river:
+            return
+        if self.river.advance():
+            self._on_cost_update()
+
+    def _on_cost_update(self):
+        """Biaya tile berubah -> buang rute lama & cache pencarian; rute dihitung ulang (PDDL/A*)."""
+        self.auto_path = None
+        self._auto_key = None
+        self._search_key = None
+
+    def river_on_enter(self, r, c):
+        """TELL(KB, SteppedOn(x,y,t)) saat SIAPA PUN (pemain/musuh) menginjak sel kayu."""
+        if self.river is not None and self.grid[r][c] == WOOD:
+            if self.river.step_on(r, c):
+                self.show_toast("Kayu diinjak — akan tenggelam (biaya 1 -> 5)", duration=2.0)
+                self._on_cost_update()
+
+    def _poll_river(self, dt):
+        """Mode real-time: waktu sungai berjalan sendiri tiap RIVER_TICK_MS (giliran: lewat langkah)."""
+        if self.turn_based or self.in_combat:
+            return
+        self.river_tick += dt * 1000
+        if self.river_tick >= RIVER_TICK_MS:
+            self.river_tick = 0.0
+            self.advance_river_time()
+
+    def _neighbors_fn(self):
+        return lambda r, c: neighbors_of(self.grid, r, c, self.diagonal)
+
+    def _cost_hyp(self, r, c, high):
+        """Biaya sel jika pasang = high (dipakai MDP). Non-sungai: semak 3 / lainnya 1."""
+        t = self.grid[r][c]
+        if t in sungai.RIVER_TILES:
+            return self.river.cost_hyp(r, c, high)
+        return BUSH_COST if t == BUSH else 1
+
+    def _pddl_plan(self, start, goal):
+        return sungai.plan_pddl(self.river, self._neighbors_fn(), start, goal,
+                                lambda r, c: terrain_cost(self.grid, r, c),
+                                cache_key=("pddl", self.diagonal, id(self.grid)))
+
+    def _meu_path(self, start, goal):
+        key = (goal, self.river.sunk_signature(), self.diagonal, id(self.grid))
+        if self._mdp_key != key:
+            cells = [(r, c) for r in range(ROWS) for c in range(COLS) if is_passable(self.grid, r, c)]
+            self._mdp = sungai.RiverMDP(cells, self._neighbors_fn(), self._cost_hyp, goal).solve()
+            self._mdp_key = key
+        path, _ = self._mdp.rollout(start, self.river.high)
+        return path if path and path[-1] == goal else None
+
+    def _plan_path(self, start, goal):
+        """Rute Mode Otomatis menurut planner aktif: PDDL (planner STRIPS atas state PDDL),
+        A* (search biasa dgn biaya dari KB) atau MEU (kebijakan MDP). Dipanggil ulang otomatis
+        saat biaya berubah (replanning trigger)."""
+        if self.river is not None and self.river.has_river:
+            if self.planner == "PDDL":
+                res = self._pddl_plan(start, goal)
+                if res["ok"]:
+                    return res["path"]
+            elif self.planner == "MEU":
+                path = self._meu_path(start, goal)
+                if path:
+                    return path
+        res = search(self.grid, start, goal, self.diagonal, self.current_heuristic_fn())
+        return res["path"] or [start]
+
+    def _path_costs(self, path):
+        """(biaya dgn pasang SEKARANG, biaya-HARAPAN dgn pasang berantai Markov) utk sebuah jalur."""
+        now = exp = 0.0
+        pu, pd = self.river.p_up, self.river.p_down
+        ph = 1.0 if self.river.high else 0.0
+        for a, b in zip(path, path[1:]):
+            f = math.sqrt(2) if (a[0] != b[0] and a[1] != b[1]) else 1.0
+            now += f * terrain_cost(self.grid, b[0], b[1])
+            ph = ph * (1 - pd) + (1 - ph) * pu                      # P(pasang tinggi) saat tiba di b
+            exp += f * ((1 - ph) * self._cost_hyp(b[0], b[1], False) + ph * self._cost_hyp(b[0], b[1], True))
+        return now, exp
+
+    def cycle_planner(self):
+        self.planner = PLANNERS[(PLANNERS.index(self.planner) + 1) % len(PLANNERS)]
+        self._on_cost_update()
+        self.show_toast(f"Planner Mode Otomatis: {self.planner}", duration=2.0)
+
+    def show_river_kb(self):
+        """Tombol K: aturan KB (FOL -> CNF), keadaan fluent sekarang, dan contoh ASK."""
+        if self.river is None or not self.river.has_river:
+            self.show_toast("Peta ini tidak punya sungai")
+            return
+        kb, w = self.river.kb, self.river
+        fl, sk = w.wood_counts()
+        lines = [(f"t={w.t} · pasang {'TINGGI' if w.high else 'RENDAH'} · kayu: {fl} apung, {sk} tenggelam", "acc")]
+        lines += [(txt, "txt") for txt in kb.rules_text("cnf")]
+        probes = {}
+        for rr in range(ROWS):
+            for cc in range(COLS):
+                probes.setdefault(self.grid[rr][cc], (rr, cc))
+        for tile in (TIDE, DEEP, ROCK, WOOD):
+            if tile in probes:
+                rr, cc = probes[tile]
+                safe, cost = kb.ask(rr, cc, w.t)
+                lines.append((f"ASK {sungai.TILE_NAMES[tile]}({rr},{cc}) -> aman={safe}, biaya={cost}",
+                              "good" if safe else "bad"))
+        lines.append(("TELL: tide(t,high) · step(x,y,t)   ASK: (aman?, biaya) sebelum A*", "dim"))
+        self.last_search_info = {"title": "KB SUNGAI · FOL/CNF (Modul 07)", "lines": lines}
+
+    def show_river_plan(self):
+        """Tombol J: bandingkan rencana PDDL, A*, dan MEU (MDP) menuju musuh target."""
+        if self.river is None or not self.river.has_river:
+            self.show_toast("Peta ini tidak punya sungai")
+            return
+        target = self._easiest_alive_enemy() or (min(self.alive_enemies(), key=lambda e: math.hypot(
+            e["pos"][0] - self.player[0], e["pos"][1] - self.player[1])) if self.alive_enemies() else None)
+        if target is None:
+            self.show_toast("Tidak ada musuh hidup sebagai target")
+            return
+        goal, w = target["pos"], self.river
+        name = optimasi.ENEMY_ROSTER[target["idx"]].name
+        t0 = time.perf_counter()
+        pl = self._pddl_plan(self.player, goal)
+        t_pl = (time.perf_counter() - t0) * 1000
+        a_path = search(self.grid, self.player, goal, self.diagonal, self.current_heuristic_fn())["path"] or [self.player]
+        t0 = time.perf_counter()
+        m_path = self._meu_path(self.player, goal) or a_path
+        t_m = (time.perf_counter() - t0) * 1000
+        lines = [(f"Target: {name} di {goal} · t={w.t} · pasang {'TINGGI' if w.high else 'RENDAH'}", "acc")]
+        n_wood = sum(1 for a in pl["plan"] if a.name == "STEP_ON_WOOD")
+        pn, pe = self._path_costs(pl["path"])
+        an, ae = self._path_costs(a_path)
+        mn, me = self._path_costs(m_path)
+        lines.append((f"PDDL: {len(pl['plan'])} aksi (STEP_ON_WOOD x{n_wood}) · biaya {pn:.1f} · harapan {pe:.1f} · {t_pl:.0f} ms", "good"))
+        lines.append((f"A*  : {len(a_path) - 1} langkah · biaya {an:.1f} · harapan {ae:.1f}", "txt"))
+        lines.append((f"MEU : {len(m_path) - 1} langkah · biaya {mn:.1f} · harapan {me:.1f} · {t_m:.0f} ms (MDP {self._mdp.iterations if self._mdp else 0} iter)", "txt"))
+        shown = 0
+        for a in pl["plan"]:
+            if a.name == "STEP_ON_WOOD" and shown < 4:
+                lines.append((f"  • STEP_ON_WOOD {a.frm} -> {a.to}", "dim"))
+                shown += 1
+        lines.append((f"Planner Mode Otomatis: {self.planner} (U = ganti)", "dim"))
+        lines.append(("harapan = jalur tetap; MEU dijalankan sbg kebijakan (replan tiap tick)", "dim"))
+        self.last_search_info = {"title": "RENCANA · PDDL vs A* vs MEU (Modul 08/09)", "lines": lines}
+
+    def draw_river_badge(self):
+        """Lencana kiri-atas peta: pasang, waktu, planner, kondisi kayu."""
+        if self.river is None or not self.river.has_river or self.in_combat:
+            return
+        w = self.river
+        fl, sk = w.wood_counts()
+        high = w.high
+        box = pygame.Surface((236, 40), pygame.SRCALPHA)
+        box.fill((22, 34, 26, 215))
+        self.screen.blit(box, (12, 12))
+        pygame.draw.rect(self.screen, (44, 61, 47), (12, 12, 236, 40), 2)
+        col = (120, 190, 240) if high else (215, 195, 140)
+        self.screen.blit(self.font_small.render(f"Pasang: {'TINGGI' if high else 'RENDAH'}   t={w.t}", True, col), (20, 16))
+        self.screen.blit(self.font_tiny.render(f"Planner: {self.planner} · kayu {fl} apung / {sk} tenggelam", True, (200, 215, 195)), (20, 34))
+
+    def _draw_river_tile(self, x, y, r, c, tile):
+        """Gambar tile sungai ORGANIK: sudut membulat di tepi darat, warna air bertingkat menurut
+        jarak ke pantai, riak beranimasi, batu & kayu berbentuk tidak seragam (acak deterministik)."""
+        w = self.river
+        st = w.style.get((r, c)) or {"depth": 0, "land": (False, False, False, False)}
+        n_land, s_land, w_land, e_land = st["land"]
+        depth = st["depth"]
+        rect = pygame.Rect(x, y, CELL, CELL)
+        rad = int(CELL * 0.5)
+        corners = dict(border_top_left_radius=rad if (n_land and w_land) else 0,
+                       border_top_right_radius=rad if (n_land and e_land) else 0,
+                       border_bottom_left_radius=rad if (s_land and w_land) else 0,
+                       border_bottom_right_radius=rad if (s_land and e_land) else 0)
+        h = (r * 73856093 ^ c * 19349663) & 0xFFFF
+        tick = pygame.time.get_ticks() / 1000.0
+        water = ((88, 160, 206), (60, 126, 182), (42, 98, 158), (30, 76, 134))[depth]
+        foam = (206, 228, 240)
+        scr = self.screen
+
+        if tile == TIDE and not w.high:
+            pygame.draw.rect(scr, (204, 184, 128), rect, **corners)
+            for k in range(4):
+                px = x + 5 + ((h >> k) * 7 + k * 11) % (CELL - 10)
+                py = y + 5 + ((h >> (k + 2)) * 5 + k * 13) % (CELL - 10)
+                pygame.draw.circle(scr, (176, 156, 100), (px, py), 1 + (h >> k) % 2)
+        elif tile == TIDE:
+            pygame.draw.rect(scr, (92, 158, 204), rect, **corners)
+            off = int(math.sin(tick * 2.2 + h) * 3)
+            pygame.draw.line(scr, (150, 200, 232), (x + 5, y + CELL // 2 + off), (x + CELL - 6, y + CELL // 2 + off), 2)
+        else:
+            pygame.draw.rect(scr, water, rect, **corners)
+            for k in range(2):
+                ox = int((tick * (10 + 4 * k) + h * (k + 1)) % (CELL - 12))
+                oy = 6 + ((h >> (3 * k)) % (CELL - 14))
+                pygame.draw.line(scr, tuple(min(255, v + 34) for v in water),
+                                 (x + 4 + ox, y + oy), (x + 4 + ox + 8 + 3 * k, y + oy), 2)
+
+        edge = foam if tile != TIDE or w.high else (150, 128, 84)
+        for flag, p0, p1 in ((n_land, (x + 2, y + 1), (x + CELL - 3, y + 1)),
+                             (s_land, (x + 2, y + CELL - 2), (x + CELL - 3, y + CELL - 2)),
+                             (w_land, (x + 1, y + 2), (x + 1, y + CELL - 3)),
+                             (e_land, (x + CELL - 2, y + 2), (x + CELL - 2, y + CELL - 3))):
+            if flag:
+                pygame.draw.line(scr, edge, p0, p1, 2)
+
+        cx, cy = x + CELL // 2, y + CELL // 2
+        if tile == ROCK:
+            def blob(scale, dx, dy):
+                pts = []
+                for k in range(9):
+                    ang = k * 2 * math.pi / 9
+                    rr = CELL * 0.34 * scale * (0.82 + 0.36 * (((h >> k) & 3) / 3.0))
+                    pts.append((cx + dx + math.cos(ang) * rr * 1.1,
+                                cy + dy + math.sin(ang) * rr * 0.85))
+                return pts
+            pygame.draw.polygon(scr, (24, 56, 100), blob(1.05, 1, 4))
+            pygame.draw.polygon(scr, (116, 118, 126), blob(1.0, 0, 0))
+            pygame.draw.polygon(scr, (156, 158, 164), blob(0.62, -2, -3))
+            pygame.draw.circle(scr, (96, 132, 84), (cx + 5 - (h % 5), cy + 4), 3)
+        elif tile == WOOD:
+            state = w.kb.wood_state(r, c, w.t)
+            ang = (((h % 31) - 15) * math.pi / 180.0)
+            if state != "sunk":
+                ang += math.sin(tick * 1.6 + h) * 0.04
+            bob = math.sin(tick * 2.0 + h) * 1.5 if state != "sunk" else 0
+            half_l, half_t = CELL * 0.43, CELL * 0.17
+
+            def rot(px, py):
+                return (cx + px * math.cos(ang) - py * math.sin(ang),
+                        cy + bob + px * math.sin(ang) + py * math.cos(ang))
+
+            body = [rot(-half_l, -half_t), rot(half_l, -half_t),
+                    rot(half_l, half_t), rot(-half_l, half_t)]
+            if state == "sunk":
+                pygame.draw.polygon(scr, (44, 56, 86), body)
+                pygame.draw.polygon(scr, (84, 66, 42), body, 1)
+            else:
+                pygame.draw.polygon(scr, (88, 58, 30), [(px, py + 3) for px, py in body])
+                pygame.draw.polygon(scr, (152, 102, 54), body)
+                pygame.draw.line(scr, (190, 138, 82),
+                                 rot(-half_l + 3, -half_t + 3),
+                                 rot(half_l - 3, -half_t + 3), 2)
+                ex, ey = rot(half_l, 0)
+                pygame.draw.ellipse(scr, (196, 150, 94),
+                                    pygame.Rect(ex - 3, ey - half_t, 6, half_t * 2))
+                pygame.draw.ellipse(scr, (120, 80, 42),
+                                    pygame.Rect(ex - 3, ey - half_t, 6, half_t * 2), 1)
+
     def current_heuristic_fn(self):
         return HEURISTICS["zero"] if self.algo == "ucs" else HEURISTICS[self.heuristic]
 
@@ -719,7 +995,8 @@ class Game:
         dihitung ulang kalau posisi pemain/musuh, algoritma, heuristik, gerak diagonal
         atau peta berubah, jadi aman dipanggil tiap frame."""
         alive = tuple((e["idx"], e["pos"]) for e in self.enemies if e["alive"])
-        key = (self.player, alive, self.algo, self.heuristic, self.diagonal, id(self.grid))
+        key = (self.player, alive, self.algo, self.heuristic, self.diagonal, id(self.grid),
+               self.river.version if self.river else 0)
         if key == self._search_key:
             return
         self._search_key = key
@@ -985,6 +1262,7 @@ class Game:
         e["facing"], e["flip"] = self._facing_from_delta(dr, dc)
         e["pos"] = nxt
         e["last_move"] = time.perf_counter()
+        self.river_on_enter(nxt[0], nxt[1])
 
     def _poll_auto_mode(self, dt):
         if not self.auto_mode or self.in_combat:
@@ -996,9 +1274,10 @@ class Game:
             self.show_toast("Mode Otomatis selesai — semua musuh terjangkau sudah dikalahkan!")
             return
         goal = target_enemy["pos"]
-        if not self.auto_path or self.auto_path[-1] != goal or self.auto_path[0] != self.player:
-            res = search(self.grid, self.player, goal, self.diagonal, self.current_heuristic_fn())
-            self.auto_path = res["path"] or [self.player]
+        key = (goal, self.river.version if self.river else 0, self.planner, self.diagonal)
+        if not self.auto_path or self.auto_path[-1] != goal or self.auto_path[0] != self.player or key != self._auto_key:
+            self.auto_path = self._plan_path(self.player, goal)   # PDDL / A* / MEU; ulang saat biaya berubah
+            self._auto_key = key
         self.auto_timer += dt * 1000
         if self.auto_timer < AUTO_STEP_MS:
             return
@@ -1013,6 +1292,7 @@ class Game:
             self.player = (nr, nc)
             self.player_last_move = time.perf_counter()
             self.auto_path.pop(0)
+            self.river_on_enter(nr, nc)
             # mode GILIRAN: tiap langkah otomatis pemain = 1 giliran, jadi semua musuh
             # ikut melangkah (sama seperti try_move_player).
             # Mode real-time sudah ditangani _poll_enemy_chase().
@@ -1021,6 +1301,7 @@ class Game:
                     for e in self.enemies:
                         if e["alive"]:
                             self._step_single_enemy(e)
+                    self.advance_river_time()
         self.check_enemy_contact()
 
     @staticmethod
@@ -1048,12 +1329,14 @@ class Game:
         # melambat kalau melangkah masuk ke petak semak
         self.player_step_ms = PLAYER_STEP_MS * BUSH_SLOW_MULT if self.grid[r][c] == BUSH else PLAYER_STEP_MS
         self.player_timer = 0.0
+        self.river_on_enter(r, c)
 
         if self.turn_based:
             # giliran pemain selesai -> semua musuh roster membalas 1 langkah
             for e in self.enemies:
                 if e["alive"]:
                     self._step_single_enemy(e)
+            self.advance_river_time()
             self.check_enemy_contact()
         return True
 
@@ -1065,6 +1348,9 @@ class Game:
         x, y = c * CELL, r * CELL
         img = self.assets.grass[self.grass_variant[r][c]]
         self.screen.blit(img, (x, y))
+        if self.grid[r][c] in sungai.RIVER_TILES and self.river is not None:   # sungai: digambar prosedural
+            self._draw_river_tile(x, y, r, c, self.grid[r][c])
+            return
         if self.grid[r][c] == BUSH:  # batas lingkaran semak jadi terlihat jelas
             self.screen.blit(self._bush_tint, (x, y))
 
@@ -1322,7 +1608,12 @@ class Game:
         if t in (TREE, PROP):
             lines.append(("Penghalang (tidak bisa dilewati)", RED))
         else:
-            lines.append((f"Semak (biaya x{BUSH_COST})" if t == BUSH else "Rumput (biaya x1)", GREEN))
+            if t in sungai.RIVER_TILES and self.river is not None:
+                st = self.river.kb.wood_state(r, c, self.river.t) if t == WOOD else None
+                nm = sungai.TILE_NAMES[t] + (" (tenggelam)" if st == "sunk" else "")
+                lines.append((f"{nm} (biaya {self.river.cost(r, c)})", BLUE))
+            else:
+                lines.append((f"Semak (biaya x{BUSH_COST})" if t == BUSH else "Rumput (biaya x1)", GREEN))
             if len(sel) == 1:
                 idx, res = sel[0]
                 node = res["info"].get((r, c))
@@ -1521,7 +1812,8 @@ class Game:
         hints = [("WASD", "gerak"), ("Klik", "pindah"), ("1", "A*"), ("2", "UCS"), ("H", "heuristik"),
                 ("G", "diagonal"), ("E", "debug"), ("L", "label angka"), ("TAB", "target debug"), ("T", "giliran"),
                 ("SPACE", "lewati"), ("N", "peta baru"), ("R", "reset"), ("F", "layar penuh"),
-                ("O", "otomatis"), ("P", "local search"), ("C", "CSP"), ("X", "tutup panel"), ("ESC", "keluar")]
+                ("O", "otomatis"), ("P", "local search"), ("C", "CSP"), ("X", "tutup panel"), ("K", "KB sungai"), ("J", "rencana"),
+                ("U", "planner"), ("ESC", "keluar")]
         for i, (k, d) in enumerate(hints):
             hx, hy = x + (i % 2) * (W // 2), y + (i // 2) * 16
             self.screen.blit(self.font_bold.render(k, True, ACC), (hx, hy))
@@ -1541,7 +1833,8 @@ class Game:
             return
         colors = {"txt": (235, 244, 230), "dim": (150, 168, 145), "acc": (255, 220, 110),
                 "good": (130, 230, 150), "bad": (255, 140, 110)}
-        pad, lh, w = 12, 17, 430
+        pad, lh = 12, 17
+        w = min(MAP_W - 24, max(430, max(self.font_small.size(t)[0] for t, _ in info["lines"]) + 2 * pad))
         h = pad * 2 + 24 + lh * len(info["lines"]) + 16
         x, y = 12, SCREEN_H - h - 12
         box = pygame.Surface((w, h), pygame.SRCALPHA)
@@ -1622,6 +1915,7 @@ class Game:
         self.draw_debug_overlay()
         self.draw_debug_tooltip()
         self.draw_hud()
+        self.draw_river_badge()
         self.draw_opt_panel()
         self.draw_combat_overlay()
         pygame.display.flip()
@@ -1678,6 +1972,12 @@ class Game:
             self.run_csp()
         elif key == pygame.K_x:
             self.last_search_info = None
+        elif key == pygame.K_k:
+            self.show_river_kb()
+        elif key == pygame.K_j:
+            self.show_river_plan()
+        elif key == pygame.K_u:
+            self.cycle_planner()
         elif key == pygame.K_f:
             self.toggle_fullscreen()
         elif key == pygame.K_SPACE:
@@ -1686,6 +1986,7 @@ class Game:
                 for e in self.enemies:
                     if e["alive"]:
                         self._step_single_enemy(e)
+                self.advance_river_time()
                 self.check_enemy_contact()
         elif key == pygame.K_n:
             self.new_map()
@@ -1765,6 +2066,7 @@ class Game:
             self._poll_combat(dt)
             self._poll_enemy_chase(dt)
             self._poll_auto_mode(dt)
+            self._poll_river(dt)
             self.check_enemy_contact()
 
             self.draw()

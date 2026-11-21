@@ -35,5 +35,5 @@ P Local Search · C CSP (tekan lagi = ganti margin) · K KB sungai · J rencana 
 
 ## Anggota
 - Mohammad Arya Dhinata (2504992)
-- Bentar Bintang Umair (2509865)
+- Bentar Bintang Umeir (2509865)
 - Luthfi Aulia Jodi (2521743)

@@ -14,9 +14,11 @@ Kontrol:
     - E             : mode DEBUG — tampilkan node yang dieksplorasi + jalur pemain -> musuh
     - TAB           : pilih target debug: SEMUA musuh -> musuh 1 -> musuh 2 -> ... (tiap musuh beda warna)
     - L             : ganti angka di petak saat debug (urutan / g / h / f / panah / mati)
-    - T             : ganti mode REAL-TIME <-> TURN-BASED (giliran)
     - F             : layar penuh / jendela
-    - SPACE         : lewati giliran pemain (mode giliran) — musuh membalas 1 langkah
+    - SPACE         : lewati 1 turn — musuh melangkah & waktu sungai maju
+    SISTEM TURN adalah satu-satunya sistem waktu: masuk tile berbiaya c memakan c turn (rumput 1, semak 3,
+    pasang 1/3, sungai dalam 5, kayu 1). Tiap turn semua musuh melangkah (musuh juga menunggu sesuai biaya
+    tile yang ia masuki), pasang berganti, dan kayu yang tenggelam muncul lagi setelah sebanyak biayanya.
     - N             : peta baru
     - R             : reset posisi (respawn)
     - O             : Mode Otomatis — pemain mengejar musuh termudah (greedy)
@@ -80,18 +82,14 @@ WALK_FRAME_MS = 90     # lama tiap frame animasi jalan
 
 SS = 2  # faktor supersampling untuk gambar karakter (dirender besar lalu diperkecil agar halus)
 
-# --- Kecepatan gerak (ms per petak) ---
-PLAYER_STEP_MS = 130         # kecepatan jalan normal pemain (tahan tombol)
+# --- Kecepatan ---
 COMBAT_TURN_DELAY = 0.8      # jeda (detik) sebelum giliran NPC di pertarungan dieksekusi
-AUTO_STEP_MS = 160           # kecepatan jalan pemain saat Mode Otomatis (ms per petak)
+AUTO_STEP_MS = 160           # jeda antar langkah pemain saat Mode Otomatis (ms; 1 langkah = c turn)
 CSP_MARGINS = (optimasi.LOCK_MARGIN, 0.5, 1.0, 1.3)   # margin CSP yang dicoba bergantian (tombol C); pertama = margin KUNCI di game
-RIVER_TICK_MS = 700          # mode real-time: 1 tick waktu sungai (pasang berganti / kayu tenggelam) tiap 700 ms
 PLANNERS = ("PDDL", "A*", "MEU")   # planner rute Mode Otomatis (tombol U)
-ENEMY_STEP_MS = 260          # kecepatan jalan musuh roster saat mengejar pemain (ms per petak)
 ENEMY_RING_BASE, ENEMY_RING_STEP, ENEMY_RING_TOL = 6, 3, 0   # musuh ke-i di jarak (langkah) BASE + i*STEP dari spawn pemain, toleransi +-TOL -> urutan tiba = urutan kesulitan
 ENEMY_MIN_DIST_FROM_PLAYER = 7   # jarak minimum spawn musuh roster ke titik spawn pemain (petak)
 ENEMY_COLORS = [(230,120,120),(230,190,110),(140,210,140),(130,180,230),(200,140,230)]  # warna label tiap musuh
-BUSH_SLOW_MULT = 2.1         # pengali cooldown langkah saat berada di petak semak
 
 
 # ---------------------------------------------------------------------------
@@ -560,13 +558,6 @@ class Game:
         self.heuristic = "octile"
         self.diagonal = True
         self.debug_mode = False      # tampilkan node yang di-expand + jalur
-        self.turn_based = True       # False = real-time, True = giliran (default saat mulai)
-        self.player_turn_done = False
-
-
-        # cooldown langkah pemain (utk tahan tombol) — melambat di semak
-        self.player_timer = PLAYER_STEP_MS
-        self.player_step_ms = PLAYER_STEP_MS
 
         self.fullscreen = False
 
@@ -598,7 +589,6 @@ class Game:
         self.auto_force = False      # True = rem prediksi-kalah Mode Otomatis dilewati (tekan O lagi)
         self.river = None            # sungai.RiverWorld (KB + waktu + pasang), dibuat di new_map()
         self.planner = PLANNERS[0]   # planner rute Mode Otomatis: PDDL | A* | MEU (tombol U)
-        self.river_tick = 0.0        # akumulator tick real-time (ms)
         self._auto_key = self._mdp_key = self._mdp = None
         
         # arah hadap & animasi
@@ -620,8 +610,6 @@ class Game:
         self.river = RIVER = sungai.RiverWorld(self.grid, seed=random.randrange(1 << 30))
         self._auto_key = self._mdp_key = None
         self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
-        self.player_step_ms = PLAYER_STEP_MS
-        self.player_timer = self.player_step_ms
         self.player_stats = optimasi.DEFAULT_PLAYER_STATS
         self.spawn_enemies()
         self.debug_target = None
@@ -678,7 +666,7 @@ class Game:
     def _new_enemy_entry(idx, pos):
         return {"idx": idx, "pos": pos, "alive": True,
                 "facing": "front", "last_move": 0.0, "flip": False,
-                "path": None, "step_timer": 0.0}
+                "path": None, "wait": 0}
 
     def alive_enemies(self):
         return [e for e in self.enemies if e["alive"]]
@@ -730,8 +718,6 @@ class Game:
 
     def respawn(self):
         self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
-        self.player_step_ms = PLAYER_STEP_MS
-        self.player_timer = self.player_step_ms
 
     # ---------------- Search / stats ----------------
     # ---------------- Sungai dinamis (sungai.py): waktu, KB, planner PDDL, MDP/MEU ----------------
@@ -740,7 +726,7 @@ class Game:
         return self.grid[pos[0]][pos[1]] not in sungai.RIVER_TILES
 
     def advance_river_time(self):
-        """Satu tick waktu sungai (giliran / timer real-time): pasang berganti & kayu tenggelam.
+        """Satu TURN waktu sungai: pasang berganti, kayu tenggelam / muncul lagi.
         Perubahan biaya = REPLANNING TRIGGER (lihat _on_cost_update)."""
         if self.river is None or not self.river.has_river:
             return
@@ -757,17 +743,32 @@ class Game:
         """TELL(KB, SteppedOn(x,y,t)) saat SIAPA PUN (pemain/musuh) menginjak sel kayu."""
         if self.river is not None and self.grid[r][c] == WOOD:
             if self.river.step_on(r, c):
-                self.show_toast("Kayu diinjak — akan tenggelam (biaya 1 -> 5)", duration=2.0)
+                self.show_toast(f"Kayu diinjak — tenggelam {sungai.WOOD_RESPAWN_TURNS} turn (biaya 1 -> 5), lalu muncul lagi", duration=2.5)
                 self._on_cost_update()
 
-    def _poll_river(self, dt):
-        """Mode real-time: waktu sungai berjalan sendiri tiap RIVER_TICK_MS (giliran: lewat langkah)."""
-        if self.turn_based or self.in_combat:
-            return
-        self.river_tick += dt * 1000
-        if self.river_tick >= RIVER_TICK_MS:
-            self.river_tick = 0.0
+    # ---------------- SISTEM TURN (sistem waktu utama) ----------------
+    def turn_cost(self, r, c):
+        """Jumlah turn untuk MASUK ke tile (r,c) = biaya tile itu (dibaca dari KB untuk sungai)."""
+        return sungai.turns_for_cost(terrain_cost(self.grid, r, c))
+
+    def _tile_name(self, r, c):
+        t = self.grid[r][c]
+        if t in sungai.RIVER_TILES:
+            return sungai.TILE_NAMES[t]
+        return "Semak" if t == BUSH else "Rumput"
+
+    def _pass_turns(self, n):
+        """Majukan `n` turn. Tiap turn: semua musuh hidup melangkah (atau menunggu bila sedang
+        melewati tile berbiaya tinggi), lalu waktu sungai maju 1 tick (pasang berganti, kayu
+        tenggelam / muncul lagi). Berhenti lebih awal kalau duel dimulai."""
+        for _ in range(n):
+            if self.in_combat:
+                break
+            for e in self.enemies:
+                if e["alive"]:
+                    self._step_single_enemy(e)
             self.advance_river_time()
+            self.check_enemy_contact()
 
     def _neighbors_fn(self):
         return lambda r, c: neighbors_of(self.grid, r, c, self.diagonal)
@@ -975,6 +976,10 @@ class Game:
             if state == "sunk":
                 pygame.draw.polygon(scr, (44, 56, 86), body)
                 pygame.draw.polygon(scr, (84, 66, 42), body, 1)
+                rem = w.kb.sunk_remaining(r, c, w.t)          # hitung mundur turn sampai kayu muncul lagi
+                if rem:
+                    lbl = self.font_tiny.render(str(rem), True, (210, 224, 240))
+                    scr.blit(lbl, (cx - lbl.get_width() // 2, cy - lbl.get_height() // 2))
             else:
                 pygame.draw.polygon(scr, (88, 58, 30), [(px, py + 3) for px, py in body])
                 pygame.draw.polygon(scr, (152, 102, 54), body)
@@ -1096,9 +1101,9 @@ class Game:
                 self.show_toast(f"Kalah lawan {enemy_name}. Coba lagi nanti." if w is True
                                 else "Seri (HP imbang saat batas giliran habis).", duration=5.0)
                 self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
-                self.player_timer = self.player_step_ms
                 enemy["pos"] = self._random_enemy_position(exclude_enemy=enemy, ring_idx=enemy["idx"])
                 enemy["path"] = None
+                enemy["wait"] = 0
                 self.auto_path = None
                 self.carry_hp = None   # kalah/seri -> mundur ke spawn & pulih penuh
             combat.PLAYER_STATS_OVERRIDE = None
@@ -1229,27 +1234,12 @@ class Game:
                 alive = candidates
         return min(alive, key=lambda e: optimasi.power(optimasi.ENEMY_ROSTER[e["idx"]]))
 
-    def _poll_enemy_chase(self, dt):
-        """Semua musuh roster (optimasi.py) mengejar pemain pakai A*/UCS yang
-        sama dgn pencarian debug pemain, masing-masing kecepatan sendiri
-        (ENEMY_STEP_MS). Tidak boleh 2 musuh menumpuk di petak yang sama —
-        kalau langkah berikutnya sudah ditempati musuh lain yang masih hidup,
-        musuh itu menunggu 1 giliran (dicoba lagi step berikutnya)."""
-        if self.in_combat or self.turn_based:
-            return  # mode giliran: musuh cuma melangkah lewat WASD/SPACE (lihat try_move_player & handle_key)
-        for e in self.enemies:
-            if not e["alive"]:
-                continue
-            e["step_timer"] += dt * 1000
-            if e["step_timer"] < ENEMY_STEP_MS:
-                continue
-            e["step_timer"] = 0.0
-            self._step_single_enemy(e)
-        self.check_enemy_contact()
-
     def _step_single_enemy(self, e):
-        """Satu langkah A*/UCS musuh `e` menuju pemain (dipakai _poll_enemy_chase
-        per timer DAN tombol SPACE di mode giliran). Tidak menumpuk dgn musuh lain."""
+        """Satu turn musuh `e`: langkah A*/UCS menuju pemain. SISTEM TURN: setelah masuk tile berbiaya c,
+        musuh menunggu c-1 turn berikutnya (sama seperti pemain). Tidak menumpuk dgn musuh lain."""
+        if e.get("wait", 0) > 0:
+            e["wait"] -= 1
+            return
         res = search(self.grid, e["pos"], self.player, self.diagonal, self.current_heuristic_fn())
         path = res["path"] or [e["pos"]]
         if len(path) <= 1:
@@ -1262,6 +1252,7 @@ class Game:
         e["facing"], e["flip"] = self._facing_from_delta(dr, dc)
         e["pos"] = nxt
         e["last_move"] = time.perf_counter()
+        e["wait"] = self.turn_cost(nxt[0], nxt[1]) - 1
         self.river_on_enter(nxt[0], nxt[1])
 
     def _poll_auto_mode(self, dt):
@@ -1284,24 +1275,8 @@ class Game:
         self.auto_timer = 0.0
         if len(self.auto_path) > 1:
             nr, nc = self.auto_path[1]
-            dr, dc = nr - self.player[0], nc - self.player[1]
-            facing, flip = self._facing_from_delta(dr, dc)
-            self.player_facing = facing
-            if dc != 0:
-                self._player_flip_state = flip
-            self.player = (nr, nc)
-            self.player_last_move = time.perf_counter()
-            self.auto_path.pop(0)
-            self.river_on_enter(nr, nc)
-            # mode GILIRAN: tiap langkah otomatis pemain = 1 giliran, jadi semua musuh
-            # ikut melangkah (sama seperti try_move_player).
-            # Mode real-time sudah ditangani _poll_enemy_chase().
-            if self.turn_based:
-                if not self.in_combat:
-                    for e in self.enemies:
-                        if e["alive"]:
-                            self._step_single_enemy(e)
-                    self.advance_river_time()
+            if self.try_move_player(nr, nc) and self.auto_path:   # 1 langkah = c turn (c = biaya tile tujuan)
+                self.auto_path.pop(0)
         self.check_enemy_contact()
 
     @staticmethod
@@ -1317,6 +1292,9 @@ class Game:
         return "front", False
 
     def try_move_player(self, r, c):
+        """Satu langkah pemain memakan `turn_cost` turn = biaya tile tujuan (rumput 1, semak 3,
+        pasang 1/3, sungai dalam 5, kayu 1). Selama turn berjalan semua musuh melangkah dan waktu
+        sungai maju (lihat _pass_turns)."""
         if not is_passable(self.grid, r, c):
             return False
         dr, dc = r - self.player[0], c - self.player[1]
@@ -1324,20 +1302,13 @@ class Game:
         self.player_facing = facing
         if dc != 0:
             self._player_flip_state = flip
+        cost = self.turn_cost(r, c)                  # biaya dibaca SEBELUM waktu maju
         self.player = (r, c)
         self.player_last_move = time.perf_counter()
-        # melambat kalau melangkah masuk ke petak semak
-        self.player_step_ms = PLAYER_STEP_MS * BUSH_SLOW_MULT if self.grid[r][c] == BUSH else PLAYER_STEP_MS
-        self.player_timer = 0.0
         self.river_on_enter(r, c)
-
-        if self.turn_based:
-            # giliran pemain selesai -> semua musuh roster membalas 1 langkah
-            for e in self.enemies:
-                if e["alive"]:
-                    self._step_single_enemy(e)
-            self.advance_river_time()
-            self.check_enemy_contact()
+        if cost > 1:
+            self.show_toast(f"{self._tile_name(r, c)}: {cost} turn", duration=1.2)
+        self._pass_turns(cost)
         return True
 
     # ---------------- Drawing ----------------
@@ -1610,7 +1581,8 @@ class Game:
         else:
             if t in sungai.RIVER_TILES and self.river is not None:
                 st = self.river.kb.wood_state(r, c, self.river.t) if t == WOOD else None
-                nm = sungai.TILE_NAMES[t] + (" (tenggelam)" if st == "sunk" else "")
+                rem = self.river.kb.sunk_remaining(r, c, self.river.t) if st == "sunk" else None
+                nm = sungai.TILE_NAMES[t] + (f" (tenggelam, muncul lagi {rem} turn)" if rem else "")
                 lines.append((f"{nm} (biaya {self.river.cost(r, c)})", BLUE))
             else:
                 lines.append((f"Semak (biaya x{BUSH_COST})" if t == BUSH else "Rumput (biaya x1)", GREEN))
@@ -1697,7 +1669,8 @@ class Game:
         y = self._card_title(x, y, "PENGATURAN")
         y = self._card_row(x, y, "Algoritma", "UCS" if self.algo == "ucs" else f"A* ({self.heuristic})", ACC)
         y = self._card_row(x, y, "Gerak", "8 arah (diagonal)" if self.diagonal else "4 arah")
-        y = self._card_row(x, y, "Mode", "Giliran" if self.turn_based else "Real-time")
+        y = self._card_row(x, y, "Mode", "Giliran (utama)")
+        y = self._card_row(x, y, "Turn ke", str(self.river.t if self.river else 0))
         dbg_txt = f"AKTIF · {self.debug_target_label()}" if self.debug_mode else "mati"
         y = self._card_row(x, y, "Debug", dbg_txt, GOOD if self.debug_mode else DIM)
         y += 8
@@ -1810,7 +1783,7 @@ class Game:
         # --- kontrol ---
         y = self._card_title(x, y, "KONTROL")
         hints = [("WASD", "gerak"), ("Klik", "pindah"), ("1", "A*"), ("2", "UCS"), ("H", "heuristik"),
-                ("G", "diagonal"), ("E", "debug"), ("L", "label angka"), ("TAB", "target debug"), ("T", "giliran"),
+                ("G", "diagonal"), ("E", "debug"), ("L", "label angka"), ("TAB", "target debug"),
                 ("SPACE", "lewati"), ("N", "peta baru"), ("R", "reset"), ("F", "layar penuh"),
                 ("O", "otomatis"), ("P", "local search"), ("C", "CSP"), ("X", "tutup panel"), ("K", "KB sungai"), ("J", "rencana"),
                 ("U", "planner"), ("ESC", "keluar")]
@@ -1942,7 +1915,6 @@ class Game:
             dr, dc = move_map[key]
             nr, nc = self.player[0] + dr, self.player[1] + dc
             self.try_move_player(nr, nc)
-            self.player_timer = 0.0
             return
         if key == pygame.K_1:
             self.algo = "astar"
@@ -1961,9 +1933,7 @@ class Game:
             self.refresh_search()
             self.cycle_debug_target()
         elif key == pygame.K_t:
-            self.turn_based = not self.turn_based
-            self.player_timer = self.player_step_ms
-            self.show_toast("Mode GILIRAN aktif" if self.turn_based else "Mode REAL-TIME aktif")
+            self.show_toast("Sistem GILIRAN (turn) adalah sistem utama — mode real-time dihapus", duration=2.5)
         elif key == pygame.K_o:
             self.toggle_auto_mode()
         elif key == pygame.K_p:
@@ -1981,13 +1951,7 @@ class Game:
         elif key == pygame.K_f:
             self.toggle_fullscreen()
         elif key == pygame.K_SPACE:
-            if self.turn_based:
-                # lewati giliran pemain -> semua musuh roster membalas 1 langkah
-                for e in self.enemies:
-                    if e["alive"]:
-                        self._step_single_enemy(e)
-                self.advance_river_time()
-                self.check_enemy_contact()
+            self._pass_turns(1)          # lewati 1 turn: musuh melangkah, waktu sungai maju
         elif key == pygame.K_n:
             self.new_map()
         elif key == pygame.K_r:
@@ -2022,34 +1986,6 @@ class Game:
         if in_bounds(r, c):
             self.try_move_player(r, c)
 
-    MOVE_KEYS = {
-        pygame.K_UP: (-1, 0), pygame.K_w: (-1, 0),
-        pygame.K_DOWN: (1, 0), pygame.K_s: (1, 0),
-        pygame.K_LEFT: (0, -1), pygame.K_a: (0, -1),
-        pygame.K_RIGHT: (0, 1), pygame.K_d: (0, 1),
-    }
-
-    def _poll_continuous_movement(self, dt):
-        """Gerak halus saat tombol arah DITAHAN (real-time saja). Kecepatan
-        melambat otomatis ketika pemain sedang berada di petak semak."""
-        if self.turn_based or self.in_combat:
-            return
-        self.player_timer += dt * 1000
-        if self.player_timer < self.player_step_ms:
-            return
-        keys = pygame.key.get_pressed()
-        dr = dc = 0
-        for k, (kdr, kdc) in self.MOVE_KEYS.items():
-            if keys[k]:
-                dr, dc = kdr, kdc
-                break
-        if dr == 0 and dc == 0:
-            self.player_timer = self.player_step_ms  # siap gerak instan begitu ditekan lagi
-            return
-        moved = self.try_move_player(self.player[0] + dr, self.player[1] + dc)
-        if not moved:
-            self.player_timer = self.player_step_ms
-
     def run(self):
         while True:
             dt = self.clock.tick(FPS) / 1000.0
@@ -2062,11 +1998,8 @@ class Game:
                 elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
                     self.handle_click(event.pos)
 
-            self._poll_continuous_movement(dt)
             self._poll_combat(dt)
-            self._poll_enemy_chase(dt)
             self._poll_auto_mode(dt)
-            self._poll_river(dt)
             self.check_enemy_contact()
 
             self.draw()

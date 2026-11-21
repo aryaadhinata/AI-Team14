@@ -89,6 +89,8 @@ CSP_MARGINS = (optimasi.LOCK_MARGIN, 0.5, 1.0, 1.3)   # margin CSP yang dicoba b
 PLANNERS = ("PDDL", "A*", "MEU")   # planner rute Mode Otomatis (tombol U)
 ENEMY_RING_BASE, ENEMY_RING_STEP, ENEMY_RING_TOL = 6, 3, 0   # musuh ke-i di jarak (langkah) BASE + i*STEP dari spawn pemain, toleransi +-TOL -> urutan tiba = urutan kesulitan
 ENEMY_MIN_DIST_FROM_PLAYER = 7   # jarak minimum spawn musuh roster ke titik spawn pemain (petak)
+RESPAWN_MIN_NPC_DIST = 6   # jarak aman minimum (Euclid, dlm petak) respawn pemain ke SEMUA musuh hidup
+RESPAWN_MAX_TRIES = 100    # batas percobaan acak sebelum beralih ke fallback (titik terjauh dari musuh)
 ENEMY_COLORS = [(230,120,120),(230,190,110),(140,210,140),(130,180,230),(200,140,230)]  # warna label tiap musuh
 
 
@@ -716,8 +718,41 @@ class Game:
         dbg["preview"] = True
         self.combat_debug = dbg
 
+    # ---------------- Respawn acak yang aman ----------------
+    def _respawn_candidates(self):
+        """Semua petak AMAN untuk respawn: rumput murni (bukan pohon, properti, semak, maupun
+        tile sungai batu/pasang/dalam/kayu), masih di dalam peta, tidak sedang ditempati musuh,
+        dan TERHUBUNG ke wilayah awal (BFS) supaya pemain tidak lahir di kantong tertutup."""
+        start = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
+        reachable = bfs_steps(self.grid, start)
+        occupied = {e["pos"] for e in self.enemies if e["alive"]}
+        return [p for p in reachable
+                if in_bounds(*p) and self.grid[p[0]][p[1]] == GRASS and p not in occupied]
+
+    @staticmethod
+    def _dist_to_nearest(pos, points):
+        return min((math.hypot(pos[0] - q[0], pos[1] - q[1]) for q in points), default=math.inf)
+
+    def pick_respawn_position(self):
+        """Pilih posisi respawn: acak -> aman (grid) -> jauh dari semua musuh hidup.
+        Maks RESPAWN_MAX_TRIES percobaan; kalau gagal, ambil petak aman TERJAUH dari musuh terdekat."""
+        cands = self._respawn_candidates()
+        if not cands:   # peta ekstrem: tidak ada rumput aman -> perilaku lama (spawn tetap)
+            return nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
+        npcs = [e["pos"] for e in self.enemies if e["alive"]]
+        if not npcs:
+            return random.choice(cands)
+        for _ in range(RESPAWN_MAX_TRIES):
+            pos = random.choice(cands)
+            if self._dist_to_nearest(pos, npcs) >= RESPAWN_MIN_NPC_DIST:
+                return pos
+        return max(cands, key=lambda p: self._dist_to_nearest(p, npcs))   # fallback
+
     def respawn(self):
-        self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
+        self.player = self.pick_respawn_position()
+        self.player_facing = "front"
+        self.auto_path = None       # rute Mode Otomatis lama tidak berlaku dari posisi baru
+        self._search_key = None     # paksa hitung ulang jalur A*/UCS debug
 
     # ---------------- Search / stats ----------------
     # ---------------- Sungai dinamis (sungai.py): waktu, KB, planner PDDL, MDP/MEU ----------------
@@ -1100,11 +1135,10 @@ class Game:
                     # langsung ke-trigger lagi tiap frame krn masih nempel di sel musuh
                 self.show_toast(f"Kalah lawan {enemy_name}. Coba lagi nanti." if w is True
                                 else "Seri (HP imbang saat batas giliran habis).", duration=5.0)
-                self.player = nearest_passable_cell(self.passable, *FIXED_PLAYER_SPAWN)
                 enemy["pos"] = self._random_enemy_position(exclude_enemy=enemy, ring_idx=enemy["idx"])
                 enemy["path"] = None
                 enemy["wait"] = 0
-                self.auto_path = None
+                self.respawn()   # SETELAH musuh dipindah, agar jarak aman dihitung dari posisi musuh terbaru
                 self.carry_hp = None   # kalah/seri -> mundur ke spawn & pulih penuh
             combat.PLAYER_STATS_OVERRIDE = None
             combat.NPC_STATS_OVERRIDE = None

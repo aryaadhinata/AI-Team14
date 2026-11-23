@@ -880,7 +880,7 @@ class Game:
                 rr, cc = probes[tile]
                 safe, cost = kb.ask(rr, cc, w.t)
                 lines.append((f"ASK {sungai.TILE_NAMES[tile]}({rr},{cc}) -> aman={safe}, biaya={cost}",
-                              "good" if safe else "bad"))
+                            "good" if safe else "bad"))
         lines.append(("TELL: tide(t,high) · step(x,y,t)   ASK: (aman?, biaya) sebelum A*", "dim"))
         self.last_search_info = {"title": "KB SUNGAI · FOL/CNF (Modul 07)", "lines": lines}
 
@@ -945,9 +945,9 @@ class Game:
         rect = pygame.Rect(x, y, CELL, CELL)
         rad = int(CELL * 0.5)
         corners = dict(border_top_left_radius=rad if (n_land and w_land) else 0,
-                       border_top_right_radius=rad if (n_land and e_land) else 0,
-                       border_bottom_left_radius=rad if (s_land and w_land) else 0,
-                       border_bottom_right_radius=rad if (s_land and e_land) else 0)
+                        border_top_right_radius=rad if (n_land and e_land) else 0,
+                        border_bottom_left_radius=rad if (s_land and w_land) else 0,
+                        border_bottom_right_radius=rad if (s_land and e_land) else 0)
         h = (r * 73856093 ^ c * 19349663) & 0xFFFF
         tick = pygame.time.get_ticks() / 1000.0
         water = ((88, 160, 206), (60, 126, 182), (42, 98, 158), (30, 76, 134))[depth]

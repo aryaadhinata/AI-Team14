@@ -27,12 +27,12 @@ class TestAdversarialSearch(unittest.TestCase):
     def test_alphabeta_sama_dengan_minimax(self):
         order = list(combat.Action)
         states = [combat.new_combat(),
-                  combat.new_combat(player_hp=55, npc_hp=40, npc_starts=True),
-                  combat.new_combat(player_hp=20, npc_hp=90, npc_starts=True)]
+                    combat.new_combat(player_hp=55, npc_hp=40, npc_starts=True),
+                    combat.new_combat(player_hp=20, npc_hp=90, npc_starts=True)]
         for st in states:
             for depth in (2, 3, 4):
                 for ev in (combat.eval_hp_diff, combat.eval_defensive,
-                           combat.eval_aggressive, combat.eval_stance_aware):
+                            combat.eval_aggressive, combat.eval_stance_aware):
                     v_mm, c_mm = self._root_value(combat.minimax, st, depth, ev, order)
                     v_ab, c_ab = self._root_value(combat.alphabeta, st, depth, ev, order)
                     self.assertAlmostEqual(v_mm, v_ab, places=6)
@@ -78,7 +78,7 @@ class TestLocalSearch(unittest.TestCase):
         """Dgn recovery<1 urutan greedy tidak lagi otomatis optimal."""
         greedy = sorted(range(5), key=lambda k: opt.power(ENEMIES[k]))
         best = min(opt.evaluate_order(list(p), PLAYER, ENEMIES, recovery=0.75)
-                   for p in itertools.permutations(range(5)))
+                    for p in itertools.permutations(range(5)))
         self.assertLess(best, opt.evaluate_order(greedy, PLAYER, ENEMIES, recovery=0.75))
 
 

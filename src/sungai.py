@@ -2,16 +2,16 @@
 """
 sungai.py — SUNGAI DINAMIS + integrasi multi-modul AI (tanpa pygame).
 
-  §1  Matriks biaya tile  (Modul 03 & 09)   : ROCK / TIDE / DEEP / WOOD + carve_river()
-  §2  Knowledge Base FOL/CNF (Modul 07)      : RiverKB — klausa Horn (bentuk CNF), TELL & ASK
-  §3  Perencanaan otomatis PDDL (Modul 08)   : PDDL_DOMAIN + planner STRIPS (A* atas state PDDL)
-  §4  Keputusan di bawah ketidakpastian (Modul 09): RiverMDP — MDP + MEU (value iteration)
+    §1  Matriks biaya tile  (Modul 03 & 09)   : ROCK / TIDE / DEEP / WOOD + carve_river()
+    §2  Knowledge Base FOL/CNF (Modul 07)      : RiverKB — klausa Horn (bentuk CNF), TELL & ASK
+    §3  Perencanaan otomatis PDDL (Modul 08)   : PDDL_DOMAIN + planner STRIPS (A* atas state PDDL)
+    §4  Keputusan di bawah ketidakpastian (Modul 09): RiverMDP — MDP + MEU (value iteration)
 
 CATATAN ASUMSI (spesifikasi sumber terpotong di bagian 4 "MDP_Tuple:"):
-  tuple MDP (S, A, T, R, gamma) di §4 DIDEFINISIKAN di sini oleh implementasi:
-  S=(sel, pasang) dgn pasang in {rendah, tinggi}; A=gerak ke tetangga; T=gerak deterministik &
-  pasang berantai Markov (TIDE_P_UP / TIDE_P_DOWN); R=-biaya sel tujuan (pada pasang tujuan)
-  + hadiah tujuan; gamma=0.97. Ubah konstanta di bawah kalau definisi aslinya berbeda.
+    tuple MDP (S, A, T, R, gamma) di §4 DIDEFINISIKAN di sini oleh implementasi:
+    S=(sel, pasang) dgn pasang in {rendah, tinggi}; A=gerak ke tetangga; T=gerak deterministik &
+    pasang berantai Markov (TIDE_P_UP / TIDE_P_DOWN); R=-biaya sel tujuan (pada pasang tujuan)
+    + hadiah tujuan; gamma=0.97. Ubah konstanta di bawah kalau definisi aslinya berbeda.
 """
 import heapq
 import math
@@ -25,7 +25,7 @@ GRASS, TREE, PROP, BUSH = 0, 1, 2, 3          # sama dgn game.py
 ROCK, TIDE, DEEP, WOOD = 4, 5, 6, 7           # tile sungai (Wood_Sunk = fluent KB, bukan tipe grid)
 RIVER_TILES = (ROCK, TIDE, DEEP, WOOD)
 TILE_NAMES = {ROCK: "Rock_Fixed", TIDE: "HighTide_Area", DEEP: "DeepRiver_Fixed",
-              WOOD: "Wood_Floating"}
+                WOOD: "Wood_Floating"}
 
 COST_GROUND = 1
 COST_ROCK = 1                 # jembatan permanen, stabil
@@ -59,11 +59,11 @@ def _smooth_noise(y, phases, periods):
 
 def carve_river(g, rng=random):
     """Gambar sungai vertikal ORGANIK di tengah peta (menimpa pohon/properti/semak di jalurnya).
-      - garis tengah BERKELOK (sinus + derau halus), lebar inti & tepi berubah sepanjang aliran
-      - tepi kasar: jarak ke garis tengah diberi derau -> tidak ada tepi lurus berbentuk kotak
-      - inti = DEEP, cincin luar = TIDE (pantai pasang), sisanya daratan
-      - JEMBATAN BATU = jalur batu loncatan berliku dari tepi ke tepi di dekat ujung atas/bawah peta
-      - KAYU APUNG = seluruh inti air dalam pada 2 baris dekat jalur lurus pemain-musuh
+        - garis tengah BERKELOK (sinus + derau halus), lebar inti & tepi berubah sepanjang aliran
+        - tepi kasar: jarak ke garis tengah diberi derau -> tidak ada tepi lurus berbentuk kotak
+        - inti = DEEP, cincin luar = TIDE (pantai pasang), sisanya daratan
+        - JEMBATAN BATU = jalur batu loncatan berliku dari tepi ke tepi di dekat ujung atas/bawah peta
+        - KAYU APUNG = seluruh inti air dalam pada 2 baris dekat jalur lurus pemain-musuh
     Tile sungai TETAP bisa dilewati (hanya mahal), jadi peta tidak pernah terputus.
     Return dict info layout."""
     rows, cols = len(g), len(g[0])
@@ -99,7 +99,7 @@ def carve_river(g, rng=random):
 
     rock_row = rng.choice([r for r in (1, 2, rows - 3, rows - 2) if r not in wood_rows])
     river_cells = [(r, c) for r in range(rows) for c in range(cols)
-                   if kind[r][c] in (DEEP, TIDE)]
+                    if kind[r][c] in (DEEP, TIDE)]
     row_cells = [c for r, c in river_cells if r == rock_row]
     rock_path = []
     if row_cells:
@@ -109,10 +109,10 @@ def carve_river(g, rng=random):
         while cur[1] < right_c:
             next_c = cur[1] + 1
             options = [(rr, next_c) for rr in (rock_row - 1, rock_row, rock_row + 1)
-                       if 0 <= rr < rows and kind[rr][next_c] in (DEEP, TIDE)]
+                        if 0 <= rr < rows and kind[rr][next_c] in (DEEP, TIDE)]
             if not options:
                 options = [(rr, next_c) for rr in range(rows)
-                           if kind[rr][next_c] in (DEEP, TIDE)]
+                            if kind[rr][next_c] in (DEEP, TIDE)]
             if not options:
                 break
             cur = rng.choice(options) if rng.random() < 0.3 else min(options, key=lambda p: abs(p[0] - rock_row))
@@ -147,7 +147,7 @@ def build_style(grid):
     for r in range(rows):
         for c in range(cols):
             if is_river(r, c) and any(not is_river(r + dr, c + dc)
-                                      for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))):
+                                        for dr, dc in ((-1, 0), (1, 0), (0, -1), (0, 1))):
                 dist[(r, c)] = 0
                 queue.append((r, c))
     queue_index = 0
@@ -161,8 +161,8 @@ def build_style(grid):
                 queue.append(n)
     for (r, c), d in dist.items():
         style[(r, c)] = {"depth": min(d, 3),
-                         "land": (not is_river(r - 1, c), not is_river(r + 1, c),
-                                  not is_river(r, c - 1), not is_river(r, c + 1))}
+                        "land": (not is_river(r - 1, c), not is_river(r + 1, c),
+                                    not is_river(r, c - 1), not is_river(r, c + 1))}
     return style
 
 
@@ -221,37 +221,37 @@ def _fmt_term(x):
 KB_RULES = (
     # ---- aturan spesifikasi ----
     Clause("R1", ("TileCost", "?x", "?y", "?t", 3),
-           (("HighTide", "?t"), ("TidalArea", "?x", "?y")),
-           "HighTide(t) ∧ TidalArea(x,y) ⇒ TileCost(x,y,t)=3"),
+            (("HighTide", "?t"), ("TidalArea", "?x", "?y")),
+            "HighTide(t) ∧ TidalArea(x,y) ⇒ TileCost(x,y,t)=3"),
     Clause("R2", ("IsWoodSunk", "?x", "?y", ("+", "?t", 1)),
-           (("SteppedOn", "?x", "?y", "?t"), ("IsWoodFloating", "?x", "?y", "?t")),
-           "SteppedOn ∧ IsWoodFloating ⇒ IsWoodSunk(t+1)"),
+            (("SteppedOn", "?x", "?y", "?t"), ("IsWoodFloating", "?x", "?y", "?t")),
+            "SteppedOn ∧ IsWoodFloating ⇒ IsWoodSunk(t+1)"),
     Clause("R3", ("TileCost", "?x", "?y", "?t", 5),
-           (("IsWoodSunk", "?x", "?y", "?t"),),
-           "IsWoodSunk(t) ⇒ TileCost=5  (berlaku utk t+1 dari injakan)"),
+            (("IsWoodSunk", "?x", "?y", "?t"),),
+            "IsWoodSunk(t) ⇒ TileCost=5  (berlaku utk t+1 dari injakan)"),
     # ---- aksioma bingkai (frame axioms) agar fluent bertahan antar waktu ----
     Clause("R4", ("IsWoodSunk", "?x", "?y", ("+", "?t", 1)),
-           (("IsWoodSunk", "?x", "?y", "?t"), ("not", ("Emerge", "?x", "?y", "?t"))),
-           "kayu tenggelam tetap tenggelam sampai muncul lagi"),
+            (("IsWoodSunk", "?x", "?y", "?t"), ("not", ("Emerge", "?x", "?y", "?t"))),
+            "kayu tenggelam tetap tenggelam sampai muncul lagi"),
     Clause("R5", ("IsWoodFloating", "?x", "?y", ("+", "?t", 1)),
-           (("IsWoodFloating", "?x", "?y", "?t"), ("not", ("SteppedOn", "?x", "?y", "?t"))),
-           "kayu mengapung tetap mengapung bila tidak diinjak"),
+            (("IsWoodFloating", "?x", "?y", "?t"), ("not", ("SteppedOn", "?x", "?y", "?t"))),
+            "kayu mengapung tetap mengapung bila tidak diinjak"),
     # ---- biaya dasar & tile statis ----
     Clause("R6", ("TileCost", "?x", "?y", "?t", 5),
-           (("IsDeepRiver", "?x", "?y"),), "sungai dalam selalu 5"),
+            (("IsDeepRiver", "?x", "?y"),), "sungai dalam selalu 5"),
     Clause("R7", ("TileCost", "?x", "?y", "?t", 1),
-           (("Walkable", "?x", "?y"),), "biaya dasar 1 (batu, tanah, kayu apung, pasang rendah)"),
+            (("Walkable", "?x", "?y"),), "biaya dasar 1 (batu, tanah, kayu apung, pasang rendah)"),
     Clause("R8", ("Unsafe", "?x", "?y", "?t"),
-           (("TileCost", "?x", "?y", "?t", 5),), "biaya 5 = langkah TIDAK aman"),
+            (("TileCost", "?x", "?y", "?t", 5),), "biaya 5 = langkah TIDAK aman"),
     # ---- kayu MUNCUL LAGI setelah tenggelam selama WOOD_RESPAWN_TURNS (= biaya kayu tenggelam) ----
     Clause("R9", ("SunkSince", "?x", "?y", ("+", "?t", 1)),
-           (("SteppedOn", "?x", "?y", "?t"), ("IsWoodFloating", "?x", "?y", "?t")),
-           "catat kapan kayu mulai tenggelam"),
+            (("SteppedOn", "?x", "?y", "?t"), ("IsWoodFloating", "?x", "?y", "?t")),
+            "catat kapan kayu mulai tenggelam"),
     Clause("R10", ("Emerge", "?x", "?y", "?t"),
-           (("IsWoodSunk", "?x", "?y", "?t"), ("SunkSince", "?x", "?y", ("+", "?t", -(WOOD_RESPAWN_TURNS - 1)))),
-           "tenggelam sebanyak biayanya (turn) => muncul"),
+            (("IsWoodSunk", "?x", "?y", "?t"), ("SunkSince", "?x", "?y", ("+", "?t", -(WOOD_RESPAWN_TURNS - 1)))),
+            "tenggelam sebanyak biayanya (turn) => muncul"),
     Clause("R11", ("IsWoodFloating", "?x", "?y", ("+", "?t", 1)),
-           (("Emerge", "?x", "?y", "?t"),), "kayu mengapung lagi di turn berikutnya"),
+            (("Emerge", "?x", "?y", "?t"),), "kayu mengapung lagi di turn berikutnya"),
 )
 _TEMPORAL = ("HighTide", "IsWoodFloating", "IsWoodSunk", "SteppedOn", "SunkSince", "Emerge")
 _FORWARD_FIRST = ("R10",)            # fakta waktu-t (Emerge) harus ada dulu sebelum aturan t -> t+1
@@ -539,7 +539,7 @@ class RiverWorld:
         self.kb.tell(("tide", self.t, high_now))
         # kayu yang baru tenggelam ATAU baru muncul lagi di t+1 mengubah biaya
         if any(self.kb.has(("IsWoodSunk", x, y, self.t)) != self.kb.has(("IsWoodSunk", x, y, t0))
-               for (x, y) in self.kb.wood):
+                for (x, y) in self.kb.wood):
             self.kb.version += 1
         return self.kb.version != v0
 
@@ -556,16 +556,16 @@ class RiverWorld:
 # §3. PERENCANAAN OTOMATIS — PDDL (STRIPS)
 # ===========================================================================
 PDDL_DOMAIN = """(define (domain sungai)
-  (:requirements :strips :typing)
-  (:types agent loc)
-  (:predicates (at ?ag - agent ?loc - loc) (adj ?a - loc ?b - loc)
-               (wood-at ?loc - loc) (wood-floating ?loc - loc) (wood-sunk ?loc - loc))
-  (:action STEP_ON_WOOD
+    (:requirements :strips :typing)
+    (:types agent loc)
+    (:predicates (at ?ag - agent ?loc - loc) (adj ?a - loc ?b - loc)
+                (wood-at ?loc - loc) (wood-floating ?loc - loc) (wood-sunk ?loc - loc))
+    (:action STEP_ON_WOOD
     :parameters (?ag - agent ?from - loc ?to - loc)
     :precondition (and (at ?ag ?from) (wood-at ?to) (wood-floating ?to) (adj ?from ?to))
     :effect (and (at ?ag ?to) (not (at ?ag ?from)) (not (wood-floating ?to)) (wood-sunk ?to)))
-  ;; tambahan agar rencana lengkap (spesifikasi hanya mendefinisikan STEP_ON_WOOD):
-  (:action MOVE
+    ;; tambahan agar rencana lengkap (spesifikasi hanya mendefinisikan STEP_ON_WOOD):
+    (:action MOVE
     :parameters (?ag - agent ?from - loc ?to - loc)
     :precondition (and (at ?ag ?from) (adj ?from ?to))
     :effect (and (at ?ag ?to) (not (at ?ag ?from))))
@@ -602,10 +602,10 @@ def ground_actions(world, neighbors, diagonal_cost=math.sqrt(2)):
                 if to in wood_cells:
                     # kayu: bisa diinjak (STEP_ON_WOOD, mengapung) atau dilalui sbg air dalam (MOVE)
                     a = Action("STEP_ON_WOOD", ("ag", _loc(frm), _loc(to)),
-                               frozenset({("at", "ag", frm), ("wood-floating", to)}),
-                               frozenset({("at", "ag", to), ("wood-sunk", to)}),
-                               frozenset({("at", "ag", frm), ("wood-floating", to)}),
-                               COST_WOOD_FLOATING * df, frm, to)
+                                frozenset({("at", "ag", frm), ("wood-floating", to)}),
+                                frozenset({("at", "ag", to), ("wood-sunk", to)}),
+                                frozenset({("at", "ag", frm), ("wood-floating", to)}),
+                                COST_WOOD_FLOATING * df, frm, to)
                     by_from.setdefault(frm, []).append(a)
                     a2 = Action("MOVE", ("ag", _loc(frm), _loc(to)),
                                 frozenset({("at", "ag", frm), ("wood-sunk", to)}),
@@ -614,8 +614,8 @@ def ground_actions(world, neighbors, diagonal_cost=math.sqrt(2)):
                     by_from.setdefault(frm, []).append(a2)
                 else:
                     a = Action("MOVE", ("ag", _loc(frm), _loc(to)),
-                               frozenset({("at", "ag", frm)}), frozenset({("at", "ag", to)}),
-                               frozenset({("at", "ag", frm)}), None, frm, to)
+                                frozenset({("at", "ag", frm)}), frozenset({("at", "ag", to)}),
+                                frozenset({("at", "ag", frm)}), None, frm, to)
                     by_from.setdefault(frm, []).append((a, to, df))
     return by_from
 
@@ -701,7 +701,7 @@ class RiverMDP:
     Kebijakan MEU: pilih aksi dgn utilitas-harapan tertinggi.  Solusi: value iteration."""
 
     def __init__(self, cells, neighbors, cost_fn, goal, p_up=TIDE_P_UP, p_down=TIDE_P_DOWN,
-                 gamma=0.97, goal_reward=60.0):
+                gamma=0.97, goal_reward=60.0):
         self.cells = list(cells)
         self.idx = {c: i for i, c in enumerate(self.cells)}
         self.goal = goal
@@ -721,7 +721,7 @@ class RiverMDP:
         ch = [cost_fn(r, c, True) for (r, c) in self.cells]
         self.cost = {False: cl, True: ch}
         self.E = {tau: [self.p[tau][False] * cl[j] + self.p[tau][True] * ch[j] for j in range(n)]
-                  for tau in (False, True)}
+                    for tau in (False, True)}
         self.V = {False: [0.0] * n, True: [0.0] * n}
         self.iterations = 0
 
@@ -736,7 +736,7 @@ class RiverMDP:
             delta = 0.0
             # U_tau[j] = gamma * sum_tau' P(tau'|tau) V_tau'[j]
             U = {tau: [gamma * (p[tau][False] * V[False][j] + p[tau][True] * V[True][j]) for j in range(n)]
-                 for tau in (False, True)}
+                for tau in (False, True)}
             for tau in (False, True):
                 Vt, Et, Ut = V[tau], E[tau], U[tau]
                 for i in range(n):

@@ -1,7 +1,7 @@
 # Laporan: Sungai Dinamis & Integrasi Multi-Modul AI
 
 Modul: `src/sungai.py` (tanpa pygame, bisa diuji terpisah) + integrasi di `src/game.py`.
-Tes: `tests/test_sungai.py` (19 tes). Tombol: **K** panel KB · **J** panel rencana · **U** ganti planner.
+Tes: `tests/test_sungai.py` (23 tes) dan `tests/test_turn.py` (9 tes, level game). Tombol: **K** panel KB · **J** panel rencana · **U** ganti planner.
 
 > **Catatan asumsi.** Spesifikasi sumber terpotong di bagian 4 (`MDP_Tuple:` tanpa isi). Tuple MDP di §4
 > dirumuskan oleh implementasi (lihat tabel §4). Aksi `MOVE`/`MOVE sunk` di §3 juga tambahan, karena
@@ -26,32 +26,55 @@ Sungai vertikal **organik** (`carve_river`), bukan pita lurus:
 |---|---|---|
 | Ground | 1 | |
 | Rock_Fixed | 1 | jembatan permanen |
-| HighTide_Area | 3 (pasang tinggi) / 1 (rendah) | pasang berantai Markov, tiap tick waktu |
+| HighTide_Area | 3 (pasang tinggi) / 1 (rendah) | pasang berantai Markov, tiap turn |
 | DeepRiver_Fixed | 5 | penalti tinggi |
-| Wood_Floating | 1 → 5 | langkah pertama 1; setelah diinjak jadi `Wood_Sunk` (5) |
+| Wood_Floating | 1 → 5 → 1 | langkah pertama 1; setelah diinjak jadi `Wood_Sunk` (5) selama 5 turn, lalu **muncul lagi** (1) |
 
 Biaya diambil **dari KB lewat ASK** (`terrain_cost` → `RiverWorld.cost` → `RiverKB.ask_cost`), sehingga
 `search()` (A*/UCS), debug overlay, dan perencana semua melihat biaya dinamis yang sama.
-**Waktu `t`**: mode giliran = 1 tick per langkah/SPACE; real-time = 1 tick per 700 ms.
+### 1.1 Sistem turn (sistem waktu utama)
+
+Mode real-time **dihapus**; satu-satunya sistem waktu adalah **turn**, dan `t` pada KB = nomor turn.
+
+- **Biaya turn = biaya tile.** Masuk ke tile berbiaya `c` memakan `c` turn (`turns_for_cost`, minimal 1):
+  rumput 1, semak 3, pasang surut 1 / pasang tinggi 3, sungai dalam 5, batu 1, kayu apung 1, kayu tenggelam 5.
+  Biaya dibaca **sebelum** waktu maju, dan untuk sungai langsung dari KB (ASK).
+- Selama tiap turn berjalan: semua musuh hidup melangkah, pasang berganti, kayu tenggelam/muncul. Duel yang
+  dimulai di tengah rangkaian turn menghentikan sisa turn.
+- **Musuh tunduk pada aturan yang sama:** setelah masuk tile berbiaya `c`, musuh menunggu `c-1` turn berikutnya
+  (mis. menyeberangi air dalam = 5 turn), sehingga menyeberang sungai juga membuat musuh lambat.
+- **SPACE** = lewati 1 turn. Tombol **T** kini hanya memberi pesan bahwa mode real-time sudah tidak ada.
+- A*/PDDL/MEU meminimalkan biaya yang sama dengan turn (selain faktor √2 pada langkah diagonal yang tetap
+  dipakai sebagai jarak), jadi rute terbaik juga rute dengan turn paling sedikit.
+- Klik mouse (`pindah`) tetap memindahkan pemain ke sel yang diklik dan juga memakan turn sebesar biaya sel itu.
 
 ## 2. Knowledge Base FOL/CNF (Modul 07)
 
 Predikat statis: `IsRock`, `IsDeepRiver`, `TidalArea`, `Walkable`. Fluent: `HighTide(t)`,
-`IsWoodFloating(x,y,t)`, `IsWoodSunk(x,y,t)`, `SteppedOn(x,y,t)`. Aturan (klausa Horn = subset CNF),
+`IsWoodFloating(x,y,t)`, `IsWoodSunk(x,y,t)`, `SteppedOn(x,y,t)`, `SunkSince(x,y,t)`, `Emerge(x,y,t)`. Aturan (klausa Horn = subset CNF),
 ditampilkan apa adanya oleh tombol **K**:
 
 ```
 R1  ¬HighTide(t) ∨ ¬TidalArea(x,y) ∨ TileCost(x,y,t,3)
 R2  ¬SteppedOn(x,y,t) ∨ ¬IsWoodFloating(x,y,t) ∨ IsWoodSunk(x,y,t+1)
 R3  ¬IsWoodSunk(x,y,t) ∨ TileCost(x,y,t,5)
-R4  ¬IsWoodSunk(x,y,t) ∨ IsWoodSunk(x,y,t+1)                          (aksioma bingkai)
+R4  ¬IsWoodSunk(x,y,t) ∨ Emerge(x,y,t) ∨ IsWoodSunk(x,y,t+1)           (aksioma bingkai)
 R5  ¬IsWoodFloating(x,y,t) ∨ SteppedOn(x,y,t) ∨ IsWoodFloating(x,y,t+1) (aksioma bingkai)
 R6  ¬IsDeepRiver(x,y) ∨ TileCost(x,y,t,5)
 R7  ¬Walkable(x,y) ∨ TileCost(x,y,t,1)
 R8  ¬TileCost(x,y,t,5) ∨ Unsafe(x,y,t)
+R9  ¬SteppedOn(x,y,t) ∨ ¬IsWoodFloating(x,y,t) ∨ SunkSince(x,y,t+1)
+R10 ¬IsWoodSunk(x,y,t) ∨ ¬SunkSince(x,y,t−4) ∨ Emerge(x,y,t)
+R11 ¬Emerge(x,y,t) ∨ IsWoodFloating(x,y,t+1)
 ```
 
-- **TELL(KB, Event)**: `("tide", t, high)` dan `("step", x, y, t)`. Aturan temporal R2/R4/R5 dijalankan
+**Kayu muncul lagi (R9–R11).** Kayu yang diinjak pada turn `T` tenggelam mulai `T+1` dan tetap tenggelam
+selama `WOOD_RESPAWN_TURNS` = biaya kayu tenggelam = **5 turn** (`T+1 … T+5`), lalu mengapung lagi di `T+6`
+dengan biaya 1 dan bisa diinjak kembali (siklus berulang). `SunkSince` mencatat awal tenggelam, `Emerge`
+muncul pada turn terakhir tenggelam (`t = s+4`), dan R4 berhenti mempertahankan `IsWoodSunk` saat itu.
+Tampilan: kayu tenggelam menampilkan **hitung mundur** (5…1) dan tooltip "muncul lagi N turn".
+
+- **TELL(KB, Event)**: `("tide", t, high)` dan `("step", x, y, t)`. Aturan temporal R2/R4/R5/R9/R10/R11 dijalankan
   *forward chaining* (unifikasi + literal negatif sebagai negation-as-failure) ke waktu t+1.
 - **ASK(KB, Query)**: `ask_cost(x,y,t)` dan `ask_safe(x,y,t)`; `ask(x,y,t) = (aman?, biaya)`.
   Inferensi *backward chaining* (resolusi SLD). Langkah **tidak aman** = `Unsafe` = biaya 5.
@@ -62,7 +85,7 @@ R8  ¬TileCost(x,y,t,5) ∨ Unsafe(x,y,t)
 
 `PDDL_DOMAIN` memuat aksi `STEP_ON_WOOD` persis seperti spesifikasi (precondition `at`, `wood-at`,
 `wood-floating`, `adj`; efek `at`, ¬`at from`, ¬`wood-floating`, `wood-sunk`) plus `MOVE` (aksi umum) dan
-`MOVE` ke kayu yang sudah tenggelam (biaya 5). `plan_pddl` memakai **A\* atas ruang state STRIPS**
+`MOVE` ke kayu yang sedang tenggelam (biaya 5). `plan_pddl` memakai **A\* atas ruang state STRIPS**
 (state = himpunan atom; aksi diterapkan lewat pre/add/delete), heuristik Chebyshev (admissible).
 `to_pddl_problem` menghasilkan file masalah PDDL standar untuk planner eksternal.
 
@@ -112,10 +135,10 @@ closed-loop lebih hemat.
 
 ## 6. Pengujian & batasan
 
-`python -m unittest discover -s tests -v` (31 tes, ±1 detik): matriks biaya, bentuk sungai organik (berkelok,
-lebar bervariasi, jembatan batu bersambung), R1–R5 (termasuk tenggelam di t+1 dan aksioma bingkai), TELL/ASK,
+`python -m unittest discover -s tests -v` (44 tes, ±1 detik): matriks biaya, bentuk sungai organik (berkelok,
+lebar bervariasi, jembatan batu bersambung), R1–R5 (termasuk tenggelam di t+1 dan aksioma bingkai), **kayu muncul lagi tepat setelah 5 turn dan bisa diinjak ulang**, **biaya turn = biaya tile** (rumput 1, sungai dalam 5, kayu 1), musuh menunggu sesuai biaya tile, TELL/ASK,
 tampilan CNF, distribusi stasioner pasang (±0.04), rencana PDDL = Dijkstra,
 efek STRIPS `STEP_ON_WOOD`, replanning setelah kayu tenggelam, MDP konvergen dan kebijakan mencapai tujuan.
 
 Batasan: (1) definisi tuple MDP & aksi `MOVE` adalah asumsi (lihat atas); (2) tide stokastik, bukan
-periodik; (3) MDP memperlakukan kayu sekali-lewat; (4) belum diuji dengan pemain manusia.
+periodik; (3) MDP dan planner PDDL memperlakukan kayu yang tenggelam sebagai tetap tenggelam selama horizon rencana (konservatif; rute dihitung ulang saat kayu muncul lagi); (4) belum diuji dengan pemain manusia.

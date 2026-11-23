@@ -121,9 +121,56 @@ class TestKnowledgeBase(unittest.TestCase):
         self.assertEqual(w.kb.wood_state(x, y, 1), "sunk")
         self.assertEqual(w.kb.ask_cost(x, y, 1), 5)             # t+1 => 5
         self.assertFalse(w.safe(x, y))
-        for _ in range(5):                                      # tetap tenggelam (aksioma bingkai R4)
+        for _ in range(S.WOOD_RESPAWN_TURNS - 2):               # tetap tenggelam sampai turn terakhirnya (R4)
             w.advance()
+        self.assertEqual(w.t, S.WOOD_RESPAWN_TURNS - 1)
         self.assertEqual(w.kb.wood_state(x, y, w.t), "sunk")
+
+    def test_kayu_muncul_lagi_setelah_sebanyak_biayanya(self):
+        g, info, w = make_world()
+        x, y = cells_of(g, S.WOOD)[0]
+        w.step_on(x, y)                                         # diinjak pada t=0 -> tenggelam di t=1
+        timeline = []
+        for _ in range(S.WOOD_RESPAWN_TURNS + 3):
+            w.advance()
+            timeline.append((w.t, w.kb.wood_state(x, y), w.kb.ask_cost(x, y), w.kb.sunk_remaining(x, y)))
+        sunk_turns = [t for t, st, _, _ in timeline if st == "sunk"]
+        self.assertEqual(sunk_turns, list(range(1, 1 + S.COST_WOOD_SUNK)))          # tenggelam persis 5 turn
+        self.assertEqual([c for _, st, c, _ in timeline if st == "sunk"], [5] * S.COST_WOOD_SUNK)
+        self.assertEqual([r for _, st, _, r in timeline if st == "sunk"], [5, 4, 3, 2, 1])   # hitung mundur
+        after = [(st, c) for t, st, c, _ in timeline if t > S.COST_WOOD_SUNK]
+        self.assertTrue(all(st == "floating" and c == 1 for st, c in after))        # muncul lagi, biaya kembali 1
+
+    def test_kayu_bisa_diinjak_dan_tenggelam_lagi_setelah_muncul(self):
+        g, info, w = make_world()
+        x, y = cells_of(g, S.WOOD)[0]
+        w.step_on(x, y)
+        for _ in range(S.WOOD_RESPAWN_TURNS + 1):
+            w.advance()
+        self.assertEqual(w.kb.wood_state(x, y), "floating")
+        self.assertTrue(w.step_on(x, y))                        # siklus kedua
+        w.advance()
+        self.assertEqual(w.kb.wood_state(x, y), "sunk")
+        self.assertEqual(w.kb.sunk_remaining(x, y), S.WOOD_RESPAWN_TURNS)
+        for _ in range(S.WOOD_RESPAWN_TURNS):
+            w.advance()
+        self.assertEqual(w.kb.wood_state(x, y), "floating")
+
+    def test_kayu_muncul_lagi_memicu_replanning(self):
+        g, info, w = make_world()
+        x, y = cells_of(g, S.WOOD)[0]
+        w.step_on(x, y)
+        w.advance()                                             # tenggelam
+        w.advance()
+        v = w.version
+        changed = [w.advance() for _ in range(S.WOOD_RESPAWN_TURNS)]
+        self.assertTrue(any(changed))                           # saat muncul, biaya berubah -> version naik
+        self.assertGreater(w.version, v)
+
+    def test_sistem_turn_biaya_tile_menjadi_jumlah_turn(self):
+        self.assertEqual([S.turns_for_cost(c) for c in (1, 3, 5)], [1, 3, 5])
+        self.assertEqual(S.turns_for_cost(0), 1)                # minimal 1 turn
+        self.assertEqual(S.turns_for_cost(1.4), 1)
 
     def test_kayu_tidak_diinjak_tetap_mengapung(self):
         g, info, w = make_world()
@@ -142,6 +189,8 @@ class TestKnowledgeBase(unittest.TestCase):
         cnf = S.RiverKB().rules_text("cnf")
         self.assertIn("R1  ¬HighTide(t) ∨ ¬TidalArea(x,y) ∨ TileCost(x,y,t,3)", cnf)
         self.assertTrue(any("IsWoodSunk(x,y,t+1)" in r and r.startswith("R2") for r in cnf))
+        self.assertTrue(any(r.startswith("R10 ") and "SunkSince(x,y,t−4)" in r and "Emerge(x,y,t)" in r for r in cnf))
+        self.assertTrue(any(r.startswith("R11 ") and "IsWoodFloating(x,y,t+1)" in r for r in cnf))
 
     def test_pasang_markov_mendekati_distribusi_stasioner(self):
         g, info, w = make_world(tide_seed=7)

@@ -33,7 +33,13 @@ COST_TIDE_HIGH, COST_TIDE_LOW = 3, 1
 COST_DEEP = 5                 # penalti tinggi
 COST_WOOD_FLOATING = 1        # langkah pertama
 COST_WOOD_SUNK = 5            # kayu yang sudah diinjak = air dalam
+WOOD_RESPAWN_TURNS = COST_WOOD_SUNK   # kayu tenggelam SELAMA sebanyak biayanya (turn), lalu mengapung lagi
 UNSAFE_COST = 5               # langkah dengan biaya >= ini dianggap TIDAK AMAN
+
+
+def turns_for_cost(cost):
+    """SISTEM TURN: masuk ke tile berbiaya `cost` memakan sebanyak `cost` turn (minimal 1)."""
+    return max(1, int(round(cost)))
 
 # Pasang: rantai Markov 2-keadaan, bergerak 1 langkah tiap tick waktu permainan.
 TIDE_P_UP = 0.20              # P(rendah -> tinggi)
@@ -208,7 +214,7 @@ class Clause:
 
 def _fmt_term(x):
     if isinstance(x, tuple):
-        return "%s%s%s" % (x[1].lstrip("?"), x[0], x[2])
+        return "%s%s%d" % (x[1].lstrip("?"), "+" if x[2] >= 0 else "−", abs(x[2]))
     return str(x).lstrip("?")
 
 
@@ -225,7 +231,8 @@ KB_RULES = (
            "IsWoodSunk(t) ⇒ TileCost=5  (berlaku utk t+1 dari injakan)"),
     # ---- aksioma bingkai (frame axioms) agar fluent bertahan antar waktu ----
     Clause("R4", ("IsWoodSunk", "?x", "?y", ("+", "?t", 1)),
-           (("IsWoodSunk", "?x", "?y", "?t"),), "kayu tenggelam tetap tenggelam"),
+           (("IsWoodSunk", "?x", "?y", "?t"), ("not", ("Emerge", "?x", "?y", "?t"))),
+           "kayu tenggelam tetap tenggelam sampai muncul lagi"),
     Clause("R5", ("IsWoodFloating", "?x", "?y", ("+", "?t", 1)),
            (("IsWoodFloating", "?x", "?y", "?t"), ("not", ("SteppedOn", "?x", "?y", "?t"))),
            "kayu mengapung tetap mengapung bila tidak diinjak"),
@@ -236,9 +243,19 @@ KB_RULES = (
            (("Walkable", "?x", "?y"),), "biaya dasar 1 (batu, tanah, kayu apung, pasang rendah)"),
     Clause("R8", ("Unsafe", "?x", "?y", "?t"),
            (("TileCost", "?x", "?y", "?t", 5),), "biaya 5 = langkah TIDAK aman"),
+    # ---- kayu MUNCUL LAGI setelah tenggelam selama WOOD_RESPAWN_TURNS (= biaya kayu tenggelam) ----
+    Clause("R9", ("SunkSince", "?x", "?y", ("+", "?t", 1)),
+           (("SteppedOn", "?x", "?y", "?t"), ("IsWoodFloating", "?x", "?y", "?t")),
+           "catat kapan kayu mulai tenggelam"),
+    Clause("R10", ("Emerge", "?x", "?y", "?t"),
+           (("IsWoodSunk", "?x", "?y", "?t"), ("SunkSince", "?x", "?y", ("+", "?t", -(WOOD_RESPAWN_TURNS - 1)))),
+           "tenggelam sebanyak biayanya (turn) => muncul"),
+    Clause("R11", ("IsWoodFloating", "?x", "?y", ("+", "?t", 1)),
+           (("Emerge", "?x", "?y", "?t"),), "kayu mengapung lagi di turn berikutnya"),
 )
-_TEMPORAL = ("HighTide", "IsWoodFloating", "IsWoodSunk", "SteppedOn")
-_FORWARD = ("R2", "R4", "R5")        # aturan temporal dijalankan forward-chaining saat TELL
+_TEMPORAL = ("HighTide", "IsWoodFloating", "IsWoodSunk", "SteppedOn", "SunkSince", "Emerge")
+_FORWARD_FIRST = ("R10",)            # fakta waktu-t (Emerge) harus ada dulu sebelum aturan t -> t+1
+_FORWARD = ("R2", "R9", "R4", "R5", "R11")        # aturan temporal dijalankan forward-chaining saat TELL
 _BACKWARD = ("R1", "R3", "R6", "R7", "R8")
 
 
@@ -248,7 +265,8 @@ def _is_var(x):
 
 def _eval(term, b):
     if isinstance(term, tuple):                       # ("+", "?t", 1)
-        return _eval(term[1], b) + term[2]
+        base = _eval(term[1], b)
+        return base + term[2] if isinstance(base, int) else term
     return b.get(term, term) if _is_var(term) else term
 
 
@@ -341,7 +359,11 @@ class RiverKB:
 
     def advance(self, t):
         """Forward chaining aturan temporal R2/R4/R5 dari waktu t ke t+1 (untuk semua kayu)."""
-        derived = []
+        for name in _FORWARD_FIRST:                       # fase 1: Emerge(x,y,t) dari fluent waktu t
+            rule = self.rules[name]
+            for b in list(self._match_body(rule.body, {"?t": t})):
+                self._add(tuple(rule.head[:1]) + tuple(_eval(a, b) for a in rule.head[1:]))
+        derived = []                                      # fase 2: fluent waktu t+1
         for name in _FORWARD:
             rule = self.rules[name]
             for b in self._match_body(rule.body, {"?t": t}):
@@ -366,7 +388,7 @@ class RiverKB:
             lit = pos[i]
             pool = self.facts.get(lit[0], ())
             if lit[0] in _TEMPORAL:                       # waktu sudah terikat -> ambil dari indeks waktu
-                tv = _eval(lit[-1], bb) if not isinstance(lit[-1], tuple) else None
+                tv = _eval(lit[-1], bb)
                 if isinstance(tv, int):
                     pool = self._tindex.get((lit[0], tv), ())
             for fact in list(pool):
@@ -441,6 +463,16 @@ class RiverKB:
             return "floating"
         return None
 
+    def sunk_remaining(self, x, y, t=None):
+        """Sisa turn sebelum kayu (x,y) yang tenggelam mengapung lagi; None kalau tidak tenggelam."""
+        t = self.t if t is None else t
+        if not self.has(("IsWoodSunk", x, y, t)):
+            return None
+        for (_, sx, sy, s) in self.facts.get("SunkSince", ()):
+            if (sx, sy) == (x, y) and s <= t <= s + WOOD_RESPAWN_TURNS - 1:
+                return s + WOOD_RESPAWN_TURNS - t
+        return None
+
     def rules_text(self, mode="cnf"):
         return [("%s  %s" % (c.name, c.to_cnf() if mode == "cnf" else c.to_fol())) for c in KB_RULES]
 
@@ -505,8 +537,8 @@ class RiverWorld:
         p = self.p_down if was_high else self.p_up
         high_now = (not was_high) if self.rng.random() < p else was_high
         self.kb.tell(("tide", self.t, high_now))
-        # kayu yang baru tenggelam di t+1 juga mengubah biaya
-        if any(self.kb.has(("IsWoodSunk", x, y, self.t)) and not self.kb.has(("IsWoodSunk", x, y, t0))
+        # kayu yang baru tenggelam ATAU baru muncul lagi di t+1 mengubah biaya
+        if any(self.kb.has(("IsWoodSunk", x, y, self.t)) != self.kb.has(("IsWoodSunk", x, y, t0))
                for (x, y) in self.kb.wood):
             self.kb.version += 1
         return self.kb.version != v0

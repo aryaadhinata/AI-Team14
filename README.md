@@ -14,10 +14,11 @@ Folder `src/assets/` harus tetap berada di samping `src/game.py`.
     src/sungai.py           sungai dinamis: KB FOL/CNF (TELL/ASK), planner PDDL, MDP/MEU
     src/run_experiments.py  eksperimen yang dipakai laporan
     report/                 LAPORAN_PERTARUNGAN.md, LAPORAN_OPTIMASI.md, LAPORAN_SUNGAI.md
-    tests/                  test_ai.py, test_sungai.py (tes otomatis)
+    tests/                  test_ai.py, test_sungai.py, test_turn.py (tes otomatis)
 
 ## Fitur AI
 - Pathfinding A*/UCS untuk NPC dan musuh pengejar (`game.py`)
+- **Sistem turn (satu-satunya sistem waktu):** masuk tile berbiaya c memakan c turn; tiap turn semua musuh melangkah, pasang berganti, dan kayu yang tenggelam muncul lagi setelah sebanyak biayanya
 - Pertarungan bergiliran dengan 4 aksi: Attack, Defend, Heal, Parry (`pertarungan.py`)
 - 5 musuh dengan stat berbeda; menang = stat pemain naik (`optimasi.py`)
 - **CSP di gameplay:** musuh *terkunci* selama power pemain < 0.8 x power musuh; menang membuka kunci
@@ -26,7 +27,7 @@ Folder `src/assets/` harus tetap berada di samping `src/game.py`.
 - **Mode otomatis (O):** pemain mengejar musuh *tidak terkunci* yang paling mudah; berhenti bila duel diprediksi kalah
 
 ## Kontrol
-WASD gerak · SPACE lewati giliran · T mode giliran/real-time · O mode otomatis ·
+WASD gerak · SPACE lewati 1 turn · O mode otomatis ·
 P Local Search · C CSP (tekan lagi = ganti margin) · K KB sungai · J rencana PDDL/A*/MEU · U ganti planner · X tutup panel · E debug · ESC keluar
 
 ## Tes
@@ -34,5 +35,5 @@ P Local Search · C CSP (tekan lagi = ganti margin) · K KB sungai · J rencana 
 
 ## Anggota
 - Mohammad Arya Dhinata (2504992)
-- Bentar Bintang Umair (2509865)
+- Bentar Bintang Umeir (2509865)
 - Luthfi Aulia Jodi (2521743)
